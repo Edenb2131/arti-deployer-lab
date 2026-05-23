@@ -12,3 +12,7 @@ shared:
     url: jdbc:postgresql://postgres-art2:5432/artifactory
     username: artifactory
     password: art2_dev_password
+  # ⚠ DEV-ONLY — same values as art1 so CoT bootstrap can succeed.
+  security:
+    joinKey: EEEE1111DDDD2222CCCC3333BBBB4444
+    masterKey: FFFF0000EEEE1111DDDD2222CCCC3333

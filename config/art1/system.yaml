@@ -13,3 +13,9 @@ shared:
     url: jdbc:postgresql://postgres-art1:5432/artifactory
     username: artifactory
     password: art1_dev_password
+  # ⚠ DEV-ONLY shared secrets. Same value across art1, art2, and xray so the
+  # services can join each other. Regenerate with `openssl rand -hex 16` if
+  # you ever take this beyond localhost.
+  security:
+    joinKey: EEEE1111DDDD2222CCCC3333BBBB4444
+    masterKey: FFFF0000EEEE1111DDDD2222CCCC3333

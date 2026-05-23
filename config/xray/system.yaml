@@ -1,0 +1,26 @@
+## Xray — system.yaml
+## Joins art1 via shared joinKey (must match config/art1/system.yaml).
+configVersion: 1
+
+shared:
+  jfrogUrl: http://artifactory1:8082
+  node:
+    id: xray-node-1
+    name: xray-node-1
+    ip: xray
+  database:
+    type: postgresql
+    driver: org.postgresql.Driver
+    url: jdbc:postgresql://postgres-xray:5432/xraydb
+    username: xray
+    password: xray_dev_password
+  security:
+    joinKey: EEEE1111DDDD2222CCCC3333BBBB4444
+    masterKey: FFFF0000EEEE1111DDDD2222CCCC3333
+
+xray:
+  rabbitMq:
+    active: true
+    url: amqp://rabbitmq-xray:5672
+    user: guest
+    password: guest

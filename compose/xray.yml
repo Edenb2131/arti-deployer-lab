@@ -1,0 +1,80 @@
+# Overlay: Xray + its own PostgreSQL + RabbitMQ.
+# Joined to art1 via shared joinKey (see config/art1/system.yaml).
+services:
+  postgres-xray:
+    image: postgres:${POSTGRES_VERSION}
+    container_name: postgres-xray
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: xray
+      POSTGRES_PASSWORD: ${PG_XRAY_PASSWORD}
+      POSTGRES_DB: xraydb
+    volumes:
+      - postgres-xray-data:/var/lib/postgresql/data
+    networks: [arti-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xray -d xraydb"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  rabbitmq-xray:
+    image: rabbitmq:3-management
+    container_name: rabbitmq-xray
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq-xray-data:/var/lib/rabbitmq
+    networks: [arti-net]
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  xray:
+    image: releases-docker.jfrog.io/jfrog/xray:${XRAY_VERSION}
+    container_name: arti-xray
+    restart: unless-stopped
+    depends_on:
+      postgres-xray:
+        condition: service_healthy
+      rabbitmq-xray:
+        condition: service_healthy
+      artifactory1:
+        condition: service_healthy
+    user: "1035:1035"
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 32000
+        hard: 40000
+    ports:
+      - "${XRAY_PORT}:8000"
+    volumes:
+      - xray-data:/var/opt/jfrog/xray
+      - ../config/xray/system.yaml:/var/opt/jfrog/xray/etc/system.yaml:ro
+    networks:
+      arti-net:
+        aliases: [xray]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8082/router/api/v1/system/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 180s
+
+volumes:
+  postgres-xray-data:
+    name: arti-deployer_postgres-xray-data
+  rabbitmq-xray-data:
+    name: arti-deployer_rabbitmq-xray-data
+  xray-data:
+    name: arti-deployer_xray-data
+
+networks:
+  arti-net:
+    name: arti-deployer_net
+    external: true
