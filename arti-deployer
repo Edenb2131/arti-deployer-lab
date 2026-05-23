@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# arti-deployer — Docker-Compose lab launcher for Artifactory Support work.
+#
+# Usage:
+#   ./arti-deployer                 interactive wizard (same as `up`)
+#   ./arti-deployer up              interactive wizard
+#   ./arti-deployer down            stop everything (keeps volumes)
+#   ./arti-deployer reset           stop + wipe volumes (destructive)
+#   ./arti-deployer status          show running services
+#   ./arti-deployer logs [service]  tail logs
+
+set -euo pipefail
+
+# shellcheck source=scripts/lib.sh
+source "$(cd "$(dirname "$0")" && pwd)/scripts/lib.sh"
+
+cmd="${1:-up}"
+
+# ─── wizard ──────────────────────────────────────────────────────────────────
+wizard() {
+  log_step "arti-deployer wizard"
+
+  # 1. Instance count
+  local count_choice
+  count_choice=$(gum choose --header "How many Artifactory instances?" \
+    "1" \
+    "2  (auto-configures CoT + Access Federation)")
+  INSTANCE_COUNT="${count_choice%% *}"
+
+  # 2. Configurations (multi-select)
+  local configs
+  configs=$(gum choose --no-limit \
+    --header "Pick configurations (space to toggle, enter to confirm):" \
+    "NGINX (reverse proxy)" \
+    "LDAP" \
+    "Keycloak (OIDC)" || true)
+
+  USE_NGINX=0; USE_LDAP=0; USE_KEYCLOAK=0; USE_NGINX_HTTPS=0
+  grep -q "NGINX"    <<< "${configs}" && USE_NGINX=1
+  grep -q "LDAP"     <<< "${configs}" && USE_LDAP=1
+  grep -q "Keycloak" <<< "${configs}" && USE_KEYCLOAK=1
+
+  # 2a. HTTPS sub-choice
+  if [[ "${USE_NGINX}" == "1" ]]; then
+    if gum confirm "Use HTTPS for NGINX? (self-signed cert)"; then
+      USE_NGINX_HTTPS=1
+    fi
+  fi
+
+  # 3. Xray
+  USE_XRAY=0
+  if gum confirm "Deploy Xray as well?"; then
+    USE_XRAY=1
+  fi
+
+  # Show summary + confirm
+  echo
+  gum style --border rounded --padding "0 2" --border-foreground 51 \
+"Selection:
+  Instances:      ${INSTANCE_COUNT}
+  NGINX:          $([[ "${USE_NGINX}" == "1" ]] && echo "yes ($([[ "${USE_NGINX_HTTPS}" == "1" ]] && echo "HTTPS" || echo "HTTP"))" || echo no)
+  LDAP:           $([[ "${USE_LDAP}" == "1" ]] && echo yes || echo no)
+  Keycloak:       $([[ "${USE_KEYCLOAK}" == "1" ]] && echo yes || echo no)
+  Xray:           $([[ "${USE_XRAY}" == "1" ]] && echo yes || echo no)"
+  echo
+
+  gum confirm "Proceed with this configuration?" || { log_warn "Cancelled."; exit 0; }
+
+  save_selection
+}
+
+# ─── up ──────────────────────────────────────────────────────────────────────
+cmd_up() {
+  check_deps
+  load_env
+  wizard
+
+  log_step "Preparing license files"
+  write_license art1
+  [[ "${INSTANCE_COUNT}" == "2" ]] && write_license art2
+
+  if [[ "${USE_NGINX_HTTPS}" == "1" ]]; then
+    log_step "Generating self-signed cert for NGINX"
+    "${SCRIPTS_DIR}/gen-self-signed.sh"
+  fi
+
+  log_step "Starting containers"
+  # shellcheck disable=SC2046
+  docker compose $(build_compose_chain) up -d
+
+  log_step "Waiting for Artifactory health"
+  wait_for_af "${AF1_HTTP_PORT}" "Artifactory 1"
+  if [[ "${INSTANCE_COUNT}" == "2" ]]; then
+    wait_for_af "${AF2_HTTP_PORT}" "Artifactory 2"
+  fi
+
+  # Post-up configurators
+  if [[ "${INSTANCE_COUNT}" == "2" ]]; then
+    log_step "Configuring Circle of Trust + Access Federation"
+    "${SCRIPTS_DIR}/configure-cot.sh" || log_warn "CoT configurator returned non-zero — see scripts/configure-cot.sh"
+  fi
+
+  if [[ "${USE_LDAP}" == "1" ]]; then
+    log_step "Wiring LDAP into Artifactory"
+    "${SCRIPTS_DIR}/configure-ldap.sh" || log_warn "LDAP configurator returned non-zero — see scripts/configure-ldap.sh"
+  fi
+
+  if [[ "${USE_KEYCLOAK}" == "1" ]]; then
+    log_step "Wiring Keycloak (OIDC) into Artifactory"
+    "${SCRIPTS_DIR}/configure-keycloak.sh" || log_warn "Keycloak configurator returned non-zero — see scripts/configure-keycloak.sh"
+  fi
+
+  print_summary
+}
+
+# ─── down ────────────────────────────────────────────────────────────────────
+cmd_down() {
+  check_deps
+  load_env
+  load_selection
+  # shellcheck disable=SC2046
+  docker compose $(build_compose_chain) down
+  log_ok "Stopped. Volumes preserved. Use 'reset' to wipe."
+}
+
+# ─── reset ───────────────────────────────────────────────────────────────────
+cmd_reset() {
+  check_deps
+  load_env
+  load_selection
+  gum confirm "This will WIPE all volumes (Postgres + Artifactory data). Continue?" || exit 0
+  # shellcheck disable=SC2046
+  docker compose $(build_compose_chain) down -v
+  rm -f "${STATE_DIR}"/.*-configured 2>/dev/null || true
+  log_ok "Reset done."
+}
+
+# ─── status ──────────────────────────────────────────────────────────────────
+cmd_status() {
+  check_deps
+  load_env
+  load_selection
+  # shellcheck disable=SC2046
+  docker compose $(build_compose_chain) ps
+}
+
+# ─── logs ────────────────────────────────────────────────────────────────────
+cmd_logs() {
+  check_deps
+  load_env
+  load_selection
+  local svc="${1:-}"
+  # shellcheck disable=SC2046
+  if [[ -n "${svc}" ]]; then
+    docker compose $(build_compose_chain) logs -f "${svc}"
+  else
+    docker compose $(build_compose_chain) logs -f
+  fi
+}
+
+case "${cmd}" in
+  up)     cmd_up ;;
+  down)   cmd_down ;;
+  reset)  cmd_reset ;;
+  status) cmd_status ;;
+  logs)   shift || true; cmd_logs "${1:-}" ;;
+  -h|--help|help)
+    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    log_err "Unknown command: ${cmd}"
+    exit 1
+    ;;
+esac
