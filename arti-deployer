@@ -5,6 +5,11 @@
 #   ./arti-deployer init            bootstrap .env with fresh secrets (run once)
 #   ./arti-deployer                 interactive wizard (same as `up`)
 #   ./arti-deployer up              interactive wizard
+#   ./arti-deployer up [flags]      non-interactive (skip wizard); flags:
+#                                     --instances {1|2}
+#                                     --nginx | --https   (--https implies --nginx)
+#                                     --ldap --keycloak --xray
+#                                     --yes  (don't prompt for confirmation)
 #   ./arti-deployer down            stop everything (keeps volumes)
 #   ./arti-deployer reset           stop + wipe volumes (destructive)
 #   ./arti-deployer status          show running services
@@ -76,11 +81,48 @@ cmd_init() {
   "${SCRIPTS_DIR}/init-env.sh"
 }
 
+# ─── parse_up_flags ──────────────────────────────────────────────────────────
+# Returns 0 if any flag was passed (non-interactive), 1 if no flags (wizard).
+# Sets INSTANCE_COUNT / USE_* globals.
+parse_up_flags() {
+  INSTANCE_COUNT=1
+  USE_NGINX=0; USE_NGINX_HTTPS=0
+  USE_LDAP=0; USE_KEYCLOAK=0; USE_XRAY=0
+  local saw_flag=0
+  local skip_confirm=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --instances) INSTANCE_COUNT="$2"; saw_flag=1; shift 2 ;;
+      --nginx)     USE_NGINX=1;                          saw_flag=1; shift ;;
+      --https)     USE_NGINX=1; USE_NGINX_HTTPS=1;       saw_flag=1; shift ;;
+      --ldap)      USE_LDAP=1;                           saw_flag=1; shift ;;
+      --keycloak)  USE_KEYCLOAK=1;                       saw_flag=1; shift ;;
+      --xray)      USE_XRAY=1;                           saw_flag=1; shift ;;
+      --yes|-y)    skip_confirm=1;                       saw_flag=1; shift ;;
+      *) log_err "Unknown flag: $1"; exit 1 ;;
+    esac
+  done
+  CONFIRM_NEEDED=$((1 - skip_confirm))
+  if [[ "${INSTANCE_COUNT}" != "1" && "${INSTANCE_COUNT}" != "2" ]]; then
+    log_err "--instances must be 1 or 2 (got ${INSTANCE_COUNT})"
+    exit 1
+  fi
+  return $((1 - saw_flag))   # 0 if non-interactive, 1 if no flags
+}
+
 # ─── up ──────────────────────────────────────────────────────────────────────
 cmd_up() {
   check_deps
   load_env
-  wizard
+
+  if parse_up_flags "$@"; then
+    # No flags → interactive wizard.
+    wizard
+  else
+    # Non-interactive mode.
+    log_step "Non-interactive: instances=${INSTANCE_COUNT} nginx=${USE_NGINX} https=${USE_NGINX_HTTPS} ldap=${USE_LDAP} keycloak=${USE_KEYCLOAK} xray=${USE_XRAY}"
+    save_selection
+  fi
 
   log_step "Rendering config templates from .env"
   "${SCRIPTS_DIR}/render-templates.sh"
@@ -170,13 +212,13 @@ cmd_logs() {
 
 case "${cmd}" in
   init)   cmd_init ;;
-  up)     cmd_up ;;
+  up)     shift || true; cmd_up "$@" ;;
   down)   cmd_down ;;
   reset)  cmd_reset ;;
   status) cmd_status ;;
   logs)   shift || true; cmd_logs "${1:-}" ;;
   -h|--help|help)
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *)
     log_err "Unknown command: ${cmd}"
