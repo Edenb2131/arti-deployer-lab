@@ -1,4 +1,4 @@
-# artisupp-lab
+# arti-deployer-lab
 
 A Docker-Compose toolkit for **Artifactory Support engineers** to spin up
 realistic customer-like environments locally for issue reproduction.
@@ -6,7 +6,7 @@ realistic customer-like environments locally for issue reproduction.
 > Built for the JFrog App Support team. PostgreSQL everywhere by default.
 
 ```text
-$ ./artisupp
+$ ./arti-deployer
 
 ┌─ How many Artifactory instances? ──────────────────┐
 │ > 1                                                │
@@ -43,29 +43,29 @@ $ ./artisupp
 ## Quick start
 
 ```bash
-git clone https://github.com/Edenb2131/artisupp-lab.git
-cd artisupp-lab
+git clone https://github.com/Edenb2131/arti-deployer-lab.git
+cd arti-deployer-lab
 cp .env.example .env
 # edit .env and paste ARTIFACTORY_LICENSE
-./artisupp            # interactive wizard
+./arti-deployer            # interactive wizard
 ```
 
 ## Commands
 
 ```bash
-./artisupp            # interactive wizard (same as `up`)
-./artisupp up         # interactive wizard
-./artisupp down       # stop everything (keeps volumes)
-./artisupp reset      # stop everything + wipe volumes (destructive)
-./artisupp status     # show what's running
-./artisupp logs [svc] # tail logs (default: all)
+./arti-deployer            # interactive wizard (same as `up`)
+./arti-deployer up         # interactive wizard
+./arti-deployer down       # stop everything (keeps volumes)
+./arti-deployer reset      # stop everything + wipe volumes (destructive)
+./arti-deployer status     # show what's running
+./arti-deployer logs [svc] # tail logs (default: all)
 ```
 
 ## Layout
 
 ```
-artisupp-lab/
-├── artisupp              # main entrypoint
+arti-deployer-lab/
+├── arti-deployer         # main entrypoint
 ├── compose/              # one compose file per topology / overlay
 ├── config/               # per-service config (system.yaml, nginx.conf, etc.)
 ├── scripts/              # post-startup configurators (CoT, LDAP, etc.)
