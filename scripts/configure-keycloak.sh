@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
-# configure-keycloak.sh — Register Keycloak as an OIDC provider in AF 1.
-# Uses the Access OIDC API; best-effort across versions.
+# configure-keycloak.sh — Register Keycloak as an OIDC provider in AF 7.100+.
+#
+# Two-step setup:
+#   1. POST /access/api/v1/oidc                       (modern Access API,
+#                                                      Bearer-token auth)
+#   2. POST /access/api/v1/oidc/<name>/identity_mappings
+#      Maps a Keycloak claim → AF user/scope so OIDC token exchange works.
+#   3. PATCH /artifactory/api/system/configuration
+#      Adds 'Sign in with Keycloak' SSO button on the AF login page.
 
 set -euo pipefail
 # shellcheck source=lib.sh
@@ -10,11 +17,9 @@ load_env
 AF1_URL="http://localhost:${AF1_ROUTER_PORT}"
 ADMIN_USER="admin"
 ADMIN_PASS="${AF_ADMIN_PASSWORD:-password}"
-
-# Use the internal docker network hostname — both containers are on arti-net.
-KC_INTERNAL_ISSUER="http://keycloak:8080/realms/jfrog"
-# For browser redirects, users hit Keycloak on the host port.
 KC_PUBLIC_ISSUER="http://localhost:${KEYCLOAK_PORT}/realms/jfrog"
+KC_INTERNAL_ISSUER="http://keycloak:8080/realms/jfrog"
+PROVIDER_NAME="keycloak"
 
 MARKER="${STATE_DIR}/.keycloak-configured"
 if [[ -f "${MARKER}" ]]; then
@@ -22,9 +27,10 @@ if [[ -f "${MARKER}" ]]; then
   exit 0
 fi
 
-log_info "Waiting for Keycloak readiness..."
+# ─── Wait for Keycloak realm to be reachable ─────────────────────────────────
+log_info "Waiting for Keycloak realm '${PROVIDER_NAME}'..."
 elapsed=0
-until curl -sf -o /dev/null -m 5 "http://localhost:${KEYCLOAK_PORT}/realms/jfrog/.well-known/openid-configuration"; do
+until curl -sf -o /dev/null -m 5 "${KC_PUBLIC_ISSUER}/.well-known/openid-configuration"; do
   sleep 3
   elapsed=$((elapsed + 3))
   if (( elapsed > 120 )); then
@@ -32,45 +38,98 @@ until curl -sf -o /dev/null -m 5 "http://localhost:${KEYCLOAK_PORT}/realms/jfrog
     exit 1
   fi
 done
-log_ok "Keycloak realm 'jfrog' is reachable."
+log_ok "Keycloak realm is reachable."
 
-# ─── 1. Register OIDC provider in Access ─────────────────────────────────────
-log_info "Registering Keycloak as OIDC provider in AF Access..."
-oidc_payload=$(jq -nc \
-  --arg name "keycloak" \
+# ─── Get an admin bearer token from Access ───────────────────────────────────
+# /access/api/v1/* endpoints require Bearer auth as of AF 7.100+.
+log_info "Exchanging admin basic creds for an Access bearer token..."
+TOKEN=$(af_admin_token "${AF1_URL}")
+if [[ -z "${TOKEN}" || "${TOKEN}" == "null" ]]; then
+  log_err "Failed to get an admin token from /access/api/v1/tokens."
+  log_err "Make sure AF1 is up and admin password matches AF_ADMIN_PASSWORD in .env."
+  exit 1
+fi
+log_ok "Bearer token acquired."
+
+auth_header=(-H "Authorization: Bearer ${TOKEN}")
+
+# ─── 1. Register the OIDC provider ───────────────────────────────────────────
+# Schema per docs.jfrog.com /administration/reference/createOidcConfiguration
+# Required: name, issuer_url, audience, provider_type
+log_info "POST /access/api/v1/oidc ..."
+oidc_body=$(jq -nc \
+  --arg name "${PROVIDER_NAME}" \
   --arg issuer "${KC_PUBLIC_ISSUER}" \
-  --arg client_id "artifactory" \
+  --arg audience "artifactory" \
   '{
-     name: $name,
-     issuer_url: $issuer,
-     provider_type: "GENERIC",
-     client_id: $client_id,
-     audience: $client_id,
-     enable_token_issuance_via_api: true
-   }')
+    name: $name,
+    issuer_url: $issuer,
+    audience: $audience,
+    description: "Keycloak OIDC integration (arti-deployer-lab)",
+    provider_type: "generic",
+    enable_permissive_configuration: false,
+    use_default_proxy: false
+  }')
 
 http_code=$(curl -sS -o /tmp/af-oidc-resp.txt -w '%{http_code}' \
-  -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  "${auth_header[@]}" \
   -X POST -H 'Content-Type: application/json' \
-  --data "${oidc_payload}" \
+  --data "${oidc_body}" \
   "${AF1_URL}/access/api/v1/oidc")
 
-if [[ "${http_code}" =~ ^2 ]]; then
-  log_ok "OIDC provider 'keycloak' registered in Access (HTTP ${http_code})."
-else
-  log_warn "OIDC registration returned HTTP ${http_code}. Response:"
-  cat /tmp/af-oidc-resp.txt
-  log_warn "You can finish setup manually:"
-  log_warn "  Administration → Identity Providers → OIDC → Add"
-  log_warn "  Issuer URL: ${KC_PUBLIC_ISSUER}"
-  log_warn "  Client ID:  artifactory"
-  log_warn "  Secret:     artifactory-client-secret"
-fi
+case "${http_code}" in
+  20*)
+    log_ok "OIDC provider '${PROVIDER_NAME}' registered (HTTP ${http_code})."
+    ;;
+  409)
+    log_info "OIDC provider already exists — skipping create."
+    ;;
+  *)
+    log_err "OIDC registration failed (HTTP ${http_code}):"
+    cat /tmp/af-oidc-resp.txt >&2
+    log_warn "Configure manually: Administration → Identity Providers → OIDC"
+    ;;
+esac
 
-# ─── 2. (Optional) Configure OAuth SSO settings via system config ────────────
-# This step adds Keycloak as a usable SSO source in the AF login page.
-log_info "Enabling OAuth SSO via Keycloak in AF system config..."
-PATCH_YAML=$(cat <<EOF
+# ─── 2. Identity mapping (claim → AF user) ───────────────────────────────────
+# Lets `testuser` from Keycloak exchange a Keycloak token for an AF token
+# scoped as a 'readers' group member.
+log_info "POST /access/api/v1/oidc/${PROVIDER_NAME}/identity_mappings ..."
+mapping_body=$(jq -nc '{
+  name: "keycloak-testuser",
+  description: "Maps Keycloak testuser → AF user (readers scope)",
+  priority: 1,
+  claims: {
+    preferred_username: "testuser"
+  },
+  token_spec: {
+    username: "testuser",
+    scope: "applied-permissions/groups:readers",
+    expires_in: 7200
+  }
+}')
+
+http_code=$(curl -sS -o /tmp/af-oidc-map-resp.txt -w '%{http_code}' \
+  "${auth_header[@]}" \
+  -X POST -H 'Content-Type: application/json' \
+  --data "${mapping_body}" \
+  "${AF1_URL}/access/api/v1/oidc/${PROVIDER_NAME}/identity_mappings")
+
+case "${http_code}" in
+  20*) log_ok "Identity mapping 'keycloak-testuser' created (HTTP ${http_code})." ;;
+  409) log_info "Identity mapping already exists — skipping." ;;
+  *)
+    log_warn "Mapping creation returned HTTP ${http_code}. Response:"
+    cat /tmp/af-oidc-map-resp.txt
+    log_warn "Configure manually in OIDC provider settings."
+    ;;
+esac
+
+# ─── 3. Enable interactive OAuth SSO ('Sign in with Keycloak' button) ────────
+# Token exchange (steps 1+2) is for CI/CD and machine-to-machine auth.
+# For user UI login via Keycloak, AF still uses the separate oauthSettings.
+log_info "Enabling interactive OAuth SSO in AF system config..."
+sso_yaml=$(cat <<EOF
 security:
   oauthSettings:
     enableIntegration: true
@@ -82,7 +141,7 @@ security:
         enabled: true
         providerType: openId
         clientId: artifactory
-        clientSecret: artifactory-client-secret
+        clientSecret: ${KEYCLOAK_CLIENT_SECRET}
         authUrl: ${KC_PUBLIC_ISSUER}/protocol/openid-connect/auth
         tokenUrl: ${KC_INTERNAL_ISSUER}/protocol/openid-connect/token
         apiUrl: ${KC_INTERNAL_ISSUER}/protocol/openid-connect/userinfo
@@ -94,11 +153,11 @@ EOF
 http_code=$(curl -sS -o /tmp/af-oauth-resp.txt -w '%{http_code}' \
   -u "${ADMIN_USER}:${ADMIN_PASS}" \
   -X PATCH -H 'Content-Type: application/yaml' \
-  --data "${PATCH_YAML}" \
+  --data "${sso_yaml}" \
   "${AF1_URL}/artifactory/api/system/configuration")
 
 if [[ "${http_code}" =~ ^2 ]]; then
-  log_ok "OAuth SSO enabled in system config (HTTP ${http_code})."
+  log_ok "OAuth SSO enabled (HTTP ${http_code})."
 else
   log_warn "OAuth SSO patch returned HTTP ${http_code}. Response:"
   cat /tmp/af-oauth-resp.txt
@@ -106,6 +165,9 @@ else
 fi
 
 touch "${MARKER}"
-log_ok "Keycloak integration bootstrap complete."
-log_info "Try logging into AF UI — you should see a 'Sign in with keycloak' button."
-log_info "Test creds: testuser / Password123  (or kcadmin / Password123)"
+log_ok "Keycloak integration complete."
+log_info "UI login:  http://localhost:${AF1_HTTP_PORT}/ui/ → 'Sign in with keycloak'"
+log_info "Test user: testuser / \$LDAP_USER_PASSWORD  (or kcadmin same password)"
+log_info "Token exchange (CI/CD):"
+log_info "  POST ${AF1_URL}/access/api/v1/oidc/token"
+log_info "  Body: {subject_token: '<kc_token>', subject_token_type: 'urn:ietf:params:oauth:token-type:id_token', provider_name: 'keycloak'}"
