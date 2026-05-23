@@ -47,13 +47,13 @@ for v in "${SUBST_VARS[@]}"; do
 done
 
 # ─── Render every .tmpl in config/ ───────────────────────────────────────────
-shopt -s globstar nullglob
+# (macOS ships bash 3.2 with no globstar — use find for portability.)
 rendered=0
-for tmpl in "${CONFIG_DIR}"/**/*.tmpl; do
+while IFS= read -r -d '' tmpl; do
   out="${tmpl%.tmpl}"
   envsubst "${ALLOWLIST}" < "${tmpl}" > "${out}"
   chmod 600 "${out}"
   rendered=$((rendered + 1))
-done
+done < <(find "${CONFIG_DIR}" -type f -name '*.tmpl' -print0)
 
-log_ok "Rendered ${rendered} template(s) from config/**/*.tmpl"
+log_ok "Rendered ${rendered} template(s) under config/"
