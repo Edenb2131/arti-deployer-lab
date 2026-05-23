@@ -1,0 +1,15 @@
+## Artifactory 1 — system.yaml
+## Docs: https://jfrog.com/help/r/jfrog-installation-setup-documentation/system-yaml-file-descriptive
+configVersion: 1
+
+shared:
+  node:
+    id: art1
+    name: art1
+    ip: artifactory1
+  database:
+    type: postgresql
+    driver: org.postgresql.Driver
+    url: jdbc:postgresql://postgres-art1:5432/artifactory
+    username: artifactory
+    password: art1_dev_password
