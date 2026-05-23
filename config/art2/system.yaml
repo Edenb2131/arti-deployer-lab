@@ -1,0 +1,14 @@
+## Artifactory 2 — system.yaml
+configVersion: 1
+
+shared:
+  node:
+    id: art2
+    name: art2
+    ip: artifactory2
+  database:
+    type: postgresql
+    driver: org.postgresql.Driver
+    url: jdbc:postgresql://postgres-art2:5432/artifactory
+    username: artifactory
+    password: art2_dev_password

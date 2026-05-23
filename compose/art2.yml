@@ -1,0 +1,64 @@
+# Overlay: second Artifactory instance + its own PostgreSQL.
+# Included when wizard chooses INSTANCE_COUNT=2.
+# Together with art1.yml this gives two independent AF deployments on the
+# same docker network so the CoT bootstrap script can wire them up.
+services:
+  postgres-art2:
+    image: postgres:${POSTGRES_VERSION}
+    container_name: postgres-art2
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: artifactory
+      POSTGRES_PASSWORD: ${PG_AF2_PASSWORD}
+      POSTGRES_DB: artifactory
+    volumes:
+      - postgres-art2-data:/var/lib/postgresql/data
+    networks: [arti-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U artifactory -d artifactory"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  artifactory2:
+    image: releases-docker.jfrog.io/jfrog/artifactory-pro:${AF_VERSION}
+    container_name: artifactory2
+    restart: unless-stopped
+    depends_on:
+      postgres-art2:
+        condition: service_healthy
+    user: "1030:1030"
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 32000
+        hard: 40000
+    environment:
+      EXTRA_JAVA_OPTIONS: "-Xms1g -Xmx4g"
+    ports:
+      - "${AF2_HTTP_PORT}:8081"
+      - "${AF2_ROUTER_PORT}:8082"
+    volumes:
+      - artifactory2-data:/var/opt/jfrog/artifactory
+      - ../config/art2/system.yaml:/var/opt/jfrog/artifactory/etc/system.yaml:ro
+      - ../config/art2/artifactory.lic:/var/opt/jfrog/artifactory/etc/artifactory/artifactory.lic:ro
+    networks:
+      arti-net:
+        aliases: [artifactory2]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8082/router/api/v1/system/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 120s
+
+volumes:
+  postgres-art2-data:
+    name: arti-deployer_postgres-art2-data
+  artifactory2-data:
+    name: arti-deployer_artifactory2-data
+
+networks:
+  arti-net:
+    name: arti-deployer_net
+    external: true
