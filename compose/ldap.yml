@@ -1,0 +1,42 @@
+# Overlay: OpenLDAP server + AF integration wiring.
+# Uses Bitnami's image (env-driven setup, supports /ldifs/ for custom data).
+services:
+  openldap:
+    image: bitnami/openldap:${OPENLDAP_VERSION}
+    container_name: arti-openldap
+    restart: unless-stopped
+    environment:
+      LDAP_ROOT: "dc=jfrog,dc=local"
+      LDAP_ADMIN_USERNAME: admin
+      LDAP_ADMIN_PASSWORD: ${LDAP_ADMIN_PASSWORD}
+      LDAP_PORT_NUMBER: 1389
+      LDAP_LDAPS_PORT_NUMBER: 1636
+      LDAP_USER_DC: users
+      LDAP_GROUP: readers
+      # Custom LDIFs in /ldifs/ are applied after the default bootstrap.
+      LDAP_CUSTOM_LDIF_DIR: /ldifs
+      LDAP_ALLOW_ANON_BINDING: "no"
+    ports:
+      - "${LDAP_PORT}:1389"
+      - "${LDAP_TLS_PORT}:1636"
+    volumes:
+      - openldap-data:/bitnami/openldap
+      - ../config/ldap/ldifs:/ldifs:ro
+    networks:
+      arti-net:
+        aliases: [openldap]
+    healthcheck:
+      test: ["CMD-SHELL", "ldapsearch -x -H ldap://localhost:1389 -b dc=jfrog,dc=local -D 'cn=admin,dc=jfrog,dc=local' -w \"$$LDAP_ADMIN_PASSWORD\" >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  openldap-data:
+    name: arti-deployer_openldap-data
+
+networks:
+  arti-net:
+    name: arti-deployer_net
+    external: true
