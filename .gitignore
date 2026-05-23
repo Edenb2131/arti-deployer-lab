@@ -1,0 +1,36 @@
+# Local environment / secrets
+.env
+.env.local
+*.lic
+artifactory.lic
+xray.lic
+
+# Generated certificates and keys
+config/nginx/certs/*
+!config/nginx/certs/.gitkeep
+
+# Docker / runtime data (volumes are named, but be safe)
+data/
+volumes/
+.artisupp/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Logs
+*.log
+logs/
+
+# Bootstrapped license files dropped into config dirs
+config/art1/artifactory.lic
+config/art2/artifactory.lic
+config/xray/xray.lic
+
+# Generated state markers
+.cot-configured
+.ldap-configured
+.keycloak-configured
