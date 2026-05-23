@@ -1,32 +1,29 @@
-# Overlay: OpenLDAP server + AF integration wiring.
-# Uses Bitnami's image (env-driven setup, supports /ldifs/ for custom data).
+# Overlay: OpenLDAP (osixia image, same as the team's reference fixture).
+# Base DN: dc=example,dc=org — matching ldapsetupforartifactory's newscript.sh.
 services:
   openldap:
-    image: bitnami/openldap:${OPENLDAP_VERSION}
+    image: osixia/openldap:${OPENLDAP_VERSION}
     container_name: arti-openldap
     restart: unless-stopped
+    command: ["--copy-service"]
     environment:
-      LDAP_ROOT: "dc=jfrog,dc=local"
-      LDAP_ADMIN_USERNAME: admin
+      LDAP_ORGANISATION: "JFrog Lab"
+      LDAP_DOMAIN: example.org
       LDAP_ADMIN_PASSWORD: ${LDAP_ADMIN_PASSWORD}
-      LDAP_PORT_NUMBER: 1389
-      LDAP_LDAPS_PORT_NUMBER: 1636
-      LDAP_USER_DC: users
-      LDAP_GROUP: readers
-      # Custom LDIFs in /ldifs/ are applied after the default bootstrap.
-      LDAP_CUSTOM_LDIF_DIR: /ldifs
-      LDAP_ALLOW_ANON_BINDING: "no"
+      LDAP_TLS: "false"
     ports:
-      - "${LDAP_PORT}:1389"
-      - "${LDAP_TLS_PORT}:1636"
+      - "${LDAP_PORT}:389"
+      - "${LDAP_TLS_PORT}:636"
     volumes:
-      - openldap-data:/bitnami/openldap
-      - ../config/ldap/ldifs:/ldifs:ro
+      - openldap-data:/var/lib/ldap
+      - openldap-config:/etc/ldap/slapd.d
+      # Custom LDIFs applied at first bootstrap (rendered from .tmpl)
+      - ../config/ldap/ldifs:/container/service/slapd/assets/config/bootstrap/ldif/custom:ro
     networks:
       arti-net:
         aliases: [openldap]
     healthcheck:
-      test: ["CMD-SHELL", "ldapsearch -x -H ldap://localhost:1389 -b dc=jfrog,dc=local -D 'cn=admin,dc=jfrog,dc=local' -w \"$$LDAP_ADMIN_PASSWORD\" >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "ldapsearch -x -H ldap://localhost:389 -b dc=example,dc=org -D 'cn=admin,dc=example,dc=org' -w \"$$LDAP_ADMIN_PASSWORD\" >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -35,6 +32,8 @@ services:
 volumes:
   openldap-data:
     name: arti-deployer_openldap-data
+  openldap-config:
+    name: arti-deployer_openldap-config
 
 networks:
   arti-net:

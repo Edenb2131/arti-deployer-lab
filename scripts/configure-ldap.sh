@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 # configure-ldap.sh — Wire the OpenLDAP server into Artifactory 1.
-# Uses the system configuration PATCH API to add an LDAP server + group
-# settings. Idempotent: marker file prevents re-runs.
+# Uses the same /artifactory/ui/ldap and /artifactory/ui/ldapgroups/ldapgroup
+# endpoints as ldapsetupforartifactory's newscript.sh.
 
 set -euo pipefail
 # shellcheck source=lib.sh
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 load_env
 
-AF1_URL="http://localhost:${AF1_ROUTER_PORT}"
+AF1_URL="http://localhost:${AF1_HTTP_PORT}"
 ADMIN_USER="admin"
 ADMIN_PASS="${AF_ADMIN_PASSWORD:-password}"
-LDAP_KEY="ldap-local"
 
 MARKER="${STATE_DIR}/.ldap-configured"
 if [[ -f "${MARKER}" ]]; then
@@ -19,56 +18,72 @@ if [[ -f "${MARKER}" ]]; then
   exit 0
 fi
 
-# Wait briefly for LDAP container to settle (separate from AF healthcheck)
 log_info "Waiting 10s for OpenLDAP to finish ldif import..."
 sleep 10
 
-# Build the YAML patch payload
-PATCH_YAML=$(cat <<EOF
-security:
-  ldapSettings:
-    ${LDAP_KEY}:
-      enabled: true
-      ldapUrl: ldap://openldap:1389/dc=jfrog,dc=local
-      userDnPattern: "uid={0},ou=users"
-      search:
-        searchFilter: "(uid={0})"
-        searchBase: "ou=users"
-        searchSubTree: true
-        managerDn: "cn=admin,dc=jfrog,dc=local"
-        managerPassword: "${LDAP_ADMIN_PASSWORD}"
-      autoCreateUser: true
-      emailAttribute: mail
-      ldapPoisoningProtection: true
-  ldapGroupSettings:
-    ldap-groups-local:
-      name: ldap-groups-local
-      groupBaseDn: "ou=groups,dc=jfrog,dc=local"
-      groupNameAttribute: cn
-      groupMemberAttribute: member
-      subTree: true
-      filter: "(objectClass=groupOfNames)"
-      descriptionAttribute: description
-      strategy: STATIC
-      enabledLdap: ${LDAP_KEY}
-EOF
-)
+# ─── 1. LDAP server settings ─────────────────────────────────────────────────
+ldap_payload=$(jq -nc \
+  --arg pw "${LDAP_ADMIN_PASSWORD}" \
+  '{
+    enabled: true,
+    autoCreateUser: true,
+    search: {
+      searchSubTree: true,
+      searchFilter: "(uid={0})",
+      managerDn: "cn=admin,dc=example,dc=org",
+      managerPassword: $pw
+    },
+    emailAttribute: "mail",
+    ldapPoisoningProtection: true,
+    key: "openldap",
+    ldapUrl: "ldap://openldap:389/dc=example,dc=org"
+  }')
 
-log_info "Applying LDAP system configuration patch to art1..."
+log_info "POST /artifactory/ui/ldap ..."
 http_code=$(curl -sS -o /tmp/af-ldap-resp.txt -w '%{http_code}' \
   -u "${ADMIN_USER}:${ADMIN_PASS}" \
-  -X PATCH \
-  -H 'Content-Type: application/yaml' \
-  --data "${PATCH_YAML}" \
-  "${AF1_URL}/artifactory/api/system/configuration")
+  -X POST -H 'Content-Type: application/json' \
+  --data "${ldap_payload}" \
+  "${AF1_URL}/artifactory/ui/ldap")
 
 if [[ "${http_code}" =~ ^2 ]]; then
-  log_ok "LDAP wired into art1 (HTTP ${http_code})."
-  log_info "Test login: alice / Password123 — should auto-create AF user."
-  touch "${MARKER}"
+  log_ok "LDAP server registered (HTTP ${http_code})."
 else
-  log_err "LDAP patch failed (HTTP ${http_code}). Response:"
+  log_err "LDAP registration failed (HTTP ${http_code}):"
   cat /tmp/af-ldap-resp.txt >&2
-  log_warn "You can fix this manually in: Administration → Security → LDAP"
+  log_warn "Manually configure: Administration → Security → LDAP"
   exit 1
 fi
+
+# ─── 2. LDAP group settings ──────────────────────────────────────────────────
+group_payload=$(jq -nc '{
+  name: "openldap-groups",
+  groupNameAttribute: "cn",
+  groupMemberAttribute: "member",
+  subTree: true,
+  filter: "(objectClass=groupOfNames)",
+  descriptionAttribute: "description",
+  enabledLdap: "openldap",
+  strategy: "STATIC",
+  enabled: true
+}')
+
+log_info "POST /artifactory/ui/ldapgroups/ldapgroup ..."
+http_code=$(curl -sS -o /tmp/af-ldapgroup-resp.txt -w '%{http_code}' \
+  -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -X POST -H 'Content-Type: application/json' \
+  --data "${group_payload}" \
+  "${AF1_URL}/artifactory/ui/ldapgroups/ldapgroup")
+
+if [[ "${http_code}" =~ ^2 ]]; then
+  log_ok "LDAP groups configured (HTTP ${http_code})."
+else
+  log_warn "LDAP group config returned HTTP ${http_code}. Response:"
+  cat /tmp/af-ldapgroup-resp.txt
+  log_warn "Manually configure: Administration → Security → LDAP Groups"
+fi
+
+touch "${MARKER}"
+log_ok "LDAP integration complete."
+log_info "Test login: user1 / \$LDAP_USER_PASSWORD (see .env) — auto-creates AF user."
+log_info "Groups: openldap-groups → group1, group2 (each contains user1, user2, user3)"

@@ -1,0 +1,22 @@
+# Organizational structure for the JFrog support LDAP fixture.
+# Matches the layout in newscript.sh from ldapsetupforartifactory:
+#   dc=example,dc=org
+#     ou=Organization
+#       ou=Users
+#       ou=Groups
+#
+# Rendered by scripts/render-templates.sh — passwords come from .env.
+dn: ou=Organization,dc=example,dc=org
+objectClass: top
+objectClass: organizationalUnit
+ou: Organization
+
+dn: ou=Users,ou=Organization,dc=example,dc=org
+objectClass: top
+objectClass: organizationalUnit
+ou: Users
+
+dn: ou=Groups,ou=Organization,dc=example,dc=org
+objectClass: top
+objectClass: organizationalUnit
+ou: Groups

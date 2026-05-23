@@ -1,0 +1,16 @@
+# Groups — each contains User1-User3 (static membership), matching newscript.sh
+dn: cn=group1,ou=Groups,ou=Organization,dc=example,dc=org
+objectClass: groupOfNames
+objectClass: top
+cn: group1
+member: cn=User1,ou=Users,ou=Organization,dc=example,dc=org
+member: cn=User2,ou=Users,ou=Organization,dc=example,dc=org
+member: cn=User3,ou=Users,ou=Organization,dc=example,dc=org
+
+dn: cn=group2,ou=Groups,ou=Organization,dc=example,dc=org
+objectClass: groupOfNames
+objectClass: top
+cn: group2
+member: cn=User1,ou=Users,ou=Organization,dc=example,dc=org
+member: cn=User2,ou=Users,ou=Organization,dc=example,dc=org
+member: cn=User3,ou=Users,ou=Organization,dc=example,dc=org

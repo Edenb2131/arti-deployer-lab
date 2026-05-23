@@ -1,0 +1,37 @@
+# Users — matches the format newscript.sh produces (cn=UserN, uid=userN).
+# Passwords come from ${LDAP_USER_PASSWORD} in .env.
+dn: cn=User1,ou=Users,ou=Organization,dc=example,dc=org
+objectClass: inetOrgPerson
+cn: user1
+sn: name1
+description: created by arti-deployer-lab fixture
+mail: user1@org.com
+uid: user1
+userPassword: ${LDAP_USER_PASSWORD}
+
+dn: cn=User2,ou=Users,ou=Organization,dc=example,dc=org
+objectClass: inetOrgPerson
+cn: user2
+sn: name2
+description: created by arti-deployer-lab fixture
+mail: user2@org.com
+uid: user2
+userPassword: ${LDAP_USER_PASSWORD}
+
+dn: cn=User3,ou=Users,ou=Organization,dc=example,dc=org
+objectClass: inetOrgPerson
+cn: user3
+sn: name3
+description: created by arti-deployer-lab fixture
+mail: user3@org.com
+uid: user3
+userPassword: ${LDAP_USER_PASSWORD}
+
+dn: cn=User4,ou=Users,ou=Organization,dc=example,dc=org
+objectClass: inetOrgPerson
+cn: user4
+sn: name4
+description: created by arti-deployer-lab fixture
+mail: user4@org.com
+uid: user4
+userPassword: ${LDAP_USER_PASSWORD}

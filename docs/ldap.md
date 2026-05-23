@@ -1,82 +1,84 @@
 # LDAP overlay
 
-Spins up an OpenLDAP server and wires it into Artifactory 1 as an LDAP
-authentication source + group mapping.
-
-## Status: scaffold
-
-This is wired end-to-end with sample users, but the **sample LDIF is a
-placeholder**. For the real JFrog support fixture set, replace
-`config/ldap/ldifs/01-users-and-groups.ldif` with content from
-[github.jfrog.info/JFROG/ldapsetupforartifactory](https://github.jfrog.info/JFROG/ldapsetupforartifactory)
-(`ldapServer-61a5`).
+Spins up `osixia/openldap` and wires it into Artifactory 1, matching the
+structure produced by JFrog support's `ldapsetupforartifactory` newscript.sh.
 
 ## What runs
 
-- **Container:** `arti-openldap` (image: `bitnami/openldap`)
-- **Base DN:** `dc=jfrog,dc=local`
-- **Admin DN:** `cn=admin,dc=jfrog,dc=local`
+- **Container:** `arti-openldap` (image: `osixia/openldap`)
+- **Base DN:** `dc=example,dc=org`
+- **Admin DN:** `cn=admin,dc=example,dc=org`
 - **Admin password:** `${LDAP_ADMIN_PASSWORD}` from `.env`
-- **Ports:** `${LDAP_PORT}` → 1389 (LDAP), `${LDAP_TLS_PORT}` → 1636 (LDAPS)
+- **Ports:** `${LDAP_PORT}` → 389 (LDAP), `${LDAP_TLS_PORT}` → 636 (LDAPS)
 
-## Sample users (in the placeholder LDIF)
+## Directory structure (after bootstrap)
 
-| UID | Password | Groups |
-|---|---|---|
-| `alice` | `Password123` | `developers` |
-| `bob`   | `Password123` | `developers` |
-| `carol` | `Password123` | `admins` |
+```
+dc=example,dc=org
+└── ou=Organization
+    ├── ou=Users
+    │   ├── cn=User1   (uid=user1)
+    │   ├── cn=User2   (uid=user2)
+    │   ├── cn=User3   (uid=user3)
+    │   └── cn=User4   (uid=user4)
+    └── ou=Groups
+        ├── cn=group1  (members: user1, user2, user3)
+        └── cn=group2  (members: user1, user2, user3)
+```
+
+All user passwords come from `${LDAP_USER_PASSWORD}` in `.env` (auto-generated
+by `./arti-deployer init`).
 
 ## How AF gets wired
 
-`scripts/configure-ldap.sh` runs after AF is healthy. It PATCHes the
-system configuration endpoint with:
+`scripts/configure-ldap.sh` runs after AF is healthy and POSTs two payloads,
+matching newscript.sh's curl commands verbatim:
 
-- `security.ldapSettings.ldap-local` — server URL + bind credentials
-- `security.ldapGroupSettings.ldap-groups-local` — group mapping (static)
+- `POST /artifactory/ui/ldap` — server settings
+  - `searchFilter: (uid={0})`
+  - `managerDn: cn=admin,dc=example,dc=org`
+  - `autoCreateUser: true`, `ldapPoisoningProtection: true`
+- `POST /artifactory/ui/ldapgroups/ldapgroup` — STATIC group mapping
+  - `groupNameAttribute: cn`, `groupMemberAttribute: member`
+  - `filter: (objectClass=groupOfNames)`
 
 Verify in UI:
-- Administration → Security → **LDAP** — should show `ldap-local` enabled
-- Administration → Security → **LDAP Groups** — should show one mapping
-- Test login at `/ui/` with `alice` / `Password123` — user is auto-created
-  on first login because `autoCreateUser: true`.
+- Administration → Security → **LDAP** — `openldap` entry, enabled
+- Administration → Security → **LDAP Groups** — `openldap-groups` mapping
+- Test login at `/ui/` with `user1` / your `${LDAP_USER_PASSWORD}`
 
-## Swapping in the real LDIF
+## Adding more users / groups
 
-```bash
-# Pull the internal fixture (requires VPN / JFrog SSO):
-git clone https://github.jfrog.info/JFROG/ldapsetupforartifactory \
-  /tmp/ldap-fixture
+Drop more `.ldif.tmpl` files in `config/ldap/ldifs/` (numeric prefix orders
+them). `${LDAP_USER_PASSWORD}` is the only placeholder you can use. Re-run
+`./arti-deployer reset && up` so the LDAP volume re-bootstraps.
 
-# Copy LDIFs in (file naming order matters — Bitnami applies alphabetically):
-cp /tmp/ldap-fixture/*.ldif config/ldap/ldifs/
+## Switching to the AD-emulating image
 
-# Reset just the LDAP bits:
-./arti-deployer down
-rm .arti-deployer/.ldap-configured
-./arti-deployer up
-```
+If you need DYNAMIC group strategy (memberOf attribute on users), swap to
+the `dwimberger/ldap-ad-it` image used by your team's second reference script.
+That requires:
 
-If the real LDIF uses a different base DN, update `LDAP_ROOT` in
-`compose/ldap.yml` and the matching `ldapUrl` / search bases in
-`scripts/configure-ldap.sh`.
+1. `compose/ldap.yml`: change image, port `10389:10389`, admin DN
+   `uid=admin,ou=system`, password `secret`, domain `wimpi.net`
+2. New LDIF with `simulatedMicrosoftSecurityPrincipal` objectClass and
+   `memberof` attribute on each user
+3. `scripts/configure-ldap.sh`: change `searchFilter` to
+   `(sAMAccountName={0})`, `groupMemberAttribute: memberof`,
+   `strategy: DYNAMIC`
+
+PRs welcome to add an `ldap-ad` overlay alongside the standard one.
 
 ## Troubleshooting
 
-**`ldapsearch` says "Invalid credentials"** — `LDAP_ADMIN_PASSWORD` in
-`.env` must match what was set when the openldap volume was first
-initialized. Bitnami doesn't re-bootstrap on volume restart.
-`./arti-deployer reset` wipes the volume so the new password takes.
+**`ldapsearch` returns "Invalid credentials"** — the `${LDAP_ADMIN_PASSWORD}`
+in `.env` must match what was set on first volume bootstrap. osixia doesn't
+re-set on restart. Wipe with `./arti-deployer reset`.
 
-**AF says "LDAP server unreachable"** — make sure AF is on the same network.
-`docker inspect artifactory1 | jq '.[0].NetworkSettings.Networks'` should
-show `arti-deployer_net`.
-
-**Patch returns 400** — the `system.security.ldapSettings` schema differs
-slightly across AF versions. Check `./arti-deployer logs artifactory1` for
-the specific complaint and adjust `scripts/configure-ldap.sh`.
+**AF says "LDAP server unreachable"** — confirm AF is on `arti-deployer_net`:
+`docker inspect artifactory1 | jq '.[0].NetworkSettings.Networks'`.
 
 **Users log in but get no permissions** — by default LDAP users are
-auto-created but assigned to no groups. Either:
-- Add a default group via Admin UI → Security → Default Groups
-- Add a permission target that grants `ldap-groups-local` access
+auto-created but have no group membership in AF. Either configure Default
+Groups (Admin → Security) or create a Permission Target that grants
+`openldap-groups` access.
