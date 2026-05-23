@@ -90,8 +90,12 @@ build_compose_chain() {
   local chain=()
   chain+=("-f" "${COMPOSE_DIR}/art1.yml")
   [[ "${INSTANCE_COUNT}" == "2" ]] && chain+=("-f" "${COMPOSE_DIR}/art2.yml")
-  [[ "${USE_NGINX}" == "1"    ]] && chain+=("-f" "${COMPOSE_DIR}/nginx.yml")
-  [[ "${USE_NGINX_HTTPS}" == "1" ]] && chain+=("-f" "${COMPOSE_DIR}/nginx-https.yml")
+  # NGINX: HTTPS variant is standalone (supersedes HTTP), to avoid mount conflicts
+  if [[ "${USE_NGINX_HTTPS}" == "1" ]]; then
+    chain+=("-f" "${COMPOSE_DIR}/nginx-https.yml")
+  elif [[ "${USE_NGINX}" == "1" ]]; then
+    chain+=("-f" "${COMPOSE_DIR}/nginx.yml")
+  fi
   [[ "${USE_LDAP}" == "1"     ]] && chain+=("-f" "${COMPOSE_DIR}/ldap.yml")
   [[ "${USE_KEYCLOAK}" == "1" ]] && chain+=("-f" "${COMPOSE_DIR}/keycloak.yml")
   [[ "${USE_XRAY}" == "1"     ]] && chain+=("-f" "${COMPOSE_DIR}/xray.yml")
