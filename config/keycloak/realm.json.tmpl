@@ -23,7 +23,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "Password123",
+          "value": "${LDAP_USER_PASSWORD}",
           "temporary": false
         }
       ],
@@ -39,7 +39,7 @@
       "credentials": [
         {
           "type": "password",
-          "value": "Password123",
+          "value": "${LDAP_USER_PASSWORD}",
           "temporary": false
         }
       ],
@@ -58,7 +58,7 @@
       "name": "Artifactory",
       "enabled": true,
       "publicClient": false,
-      "secret": "artifactory-client-secret",
+      "secret": "${KEYCLOAK_CLIENT_SECRET}",
       "redirectUris": [
         "http://localhost:8081/*",
         "http://localhost:8082/*",

@@ -2,6 +2,7 @@
 # arti-deployer — Docker-Compose lab launcher for Artifactory Support work.
 #
 # Usage:
+#   ./arti-deployer init            bootstrap .env with fresh secrets (run once)
 #   ./arti-deployer                 interactive wizard (same as `up`)
 #   ./arti-deployer up              interactive wizard
 #   ./arti-deployer down            stop everything (keeps volumes)
@@ -69,11 +70,20 @@ wizard() {
   save_selection
 }
 
+# ─── init ────────────────────────────────────────────────────────────────────
+cmd_init() {
+  check_deps
+  "${SCRIPTS_DIR}/init-env.sh"
+}
+
 # ─── up ──────────────────────────────────────────────────────────────────────
 cmd_up() {
   check_deps
   load_env
   wizard
+
+  log_step "Rendering config templates from .env"
+  "${SCRIPTS_DIR}/render-templates.sh"
 
   log_step "Preparing license files"
   write_license art1
@@ -159,13 +169,14 @@ cmd_logs() {
 }
 
 case "${cmd}" in
+  init)   cmd_init ;;
   up)     cmd_up ;;
   down)   cmd_down ;;
   reset)  cmd_reset ;;
   status) cmd_status ;;
   logs)   shift || true; cmd_logs "${1:-}" ;;
   -h|--help|help)
-    sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
     ;;
   *)
     log_err "Unknown command: ${cmd}"

@@ -1,0 +1,22 @@
+## Artifactory 1 — system.yaml (TEMPLATE)
+## Docs: https://jfrog.com/help/r/jfrog-installation-setup-documentation/system-yaml-file-descriptive
+##
+## This file is rendered by scripts/render-templates.sh — `${...}` placeholders
+## are substituted from .env at runtime. The rendered output (system.yaml) is
+## gitignored.
+configVersion: 1
+
+shared:
+  node:
+    id: art1
+    name: art1
+    ip: artifactory1
+  database:
+    type: postgresql
+    driver: org.postgresql.Driver
+    url: jdbc:postgresql://postgres-art1:5432/artifactory
+    username: artifactory
+    password: ${PG_AF1_PASSWORD}
+  security:
+    joinKey: ${JOIN_KEY}
+    masterKey: ${MASTER_KEY}

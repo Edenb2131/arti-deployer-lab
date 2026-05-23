@@ -5,6 +5,14 @@
 artifactory.lic
 xray.lic
 
+# Rendered configs (templates are committed as *.tmpl; outputs are local-only)
+config/art1/system.yaml
+config/art2/system.yaml
+config/xray/system.yaml
+config/keycloak/realm.json
+config/ldap/ldifs/*.ldif
+!config/ldap/ldifs/*.ldif.tmpl
+
 # Generated certificates and keys
 config/nginx/certs/*
 !config/nginx/certs/.gitkeep
@@ -12,7 +20,7 @@ config/nginx/certs/*
 # Docker / runtime data (volumes are named, but be safe)
 data/
 volumes/
-.artisupp/
+.arti-deployer/
 
 # OS / editor
 .DS_Store
@@ -29,8 +37,3 @@ logs/
 config/art1/artifactory.lic
 config/art2/artifactory.lic
 config/xray/xray.lic
-
-# Generated state markers
-.cot-configured
-.ldap-configured
-.keycloak-configured

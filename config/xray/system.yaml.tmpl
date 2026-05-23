@@ -1,5 +1,6 @@
-## Xray — system.yaml
-## Joins art1 via shared joinKey (must match config/art1/system.yaml).
+## Xray — system.yaml (TEMPLATE)
+## Rendered by scripts/render-templates.sh from .env values.
+## Joins art1 via shared JOIN_KEY (must equal what's in art1's system.yaml).
 configVersion: 1
 
 shared:
@@ -13,14 +14,14 @@ shared:
     driver: org.postgresql.Driver
     url: jdbc:postgresql://postgres-xray:5432/xraydb
     username: xray
-    password: xray_dev_password
+    password: ${PG_XRAY_PASSWORD}
   security:
-    joinKey: EEEE1111DDDD2222CCCC3333BBBB4444
-    masterKey: FFFF0000EEEE1111DDDD2222CCCC3333
+    joinKey: ${JOIN_KEY}
+    masterKey: ${MASTER_KEY}
 
 xray:
   rabbitMq:
     active: true
     url: amqp://rabbitmq-xray:5672
-    user: guest
-    password: guest
+    user: ${XRAY_RABBITMQ_USER}
+    password: ${XRAY_RABBITMQ_PASSWORD}

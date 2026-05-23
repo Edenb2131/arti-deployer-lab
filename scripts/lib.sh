@@ -22,7 +22,7 @@ log_step()  { gum style --bold --foreground 51 --margin "1 0 0 0" "── $* ─
 # ─── Dependency check ────────────────────────────────────────────────────────
 check_deps() {
   local missing=()
-  for bin in docker gum jq curl openssl; do
+  for bin in docker gum jq curl openssl envsubst; do
     command -v "$bin" >/dev/null 2>&1 || missing+=("$bin")
   done
 
@@ -35,7 +35,7 @@ check_deps() {
     cat >&2 <<EOF
 
 Install on macOS with Homebrew:
-  brew install gum jq
+  brew install gum jq gettext   # gettext provides envsubst
 
 Docker Desktop (or Colima) must be running and provide 'docker compose'.
 
@@ -47,9 +47,8 @@ EOF
 # ─── Env loading ─────────────────────────────────────────────────────────────
 load_env() {
   if [[ ! -f "${ROOT_DIR}/.env" ]]; then
-    log_warn ".env not found. Copying from .env.example..."
-    cp "${ROOT_DIR}/.env.example" "${ROOT_DIR}/.env"
-    log_info "Edit ${ROOT_DIR}/.env to set ARTIFACTORY_LICENSE, then re-run."
+    log_err ".env not found."
+    log_info "Run './arti-deployer init' to bootstrap a .env with fresh secrets."
     exit 1
   fi
   # shellcheck disable=SC1090,SC1091
@@ -58,20 +57,38 @@ load_env() {
 
 # ─── License handling ────────────────────────────────────────────────────────
 # Writes config/<instance>/artifactory.lic from .env. Errors if no license set.
+# For art2, prefers ARTIFACTORY_LICENSE_2 / ARTIFACTORY_LICENSE_FILE_2 and
+# falls back to the art1 license with a warning (JFrog logs a license
+# conflict but the lab still functions for dev/test).
 write_license() {
   local instance="$1"  # art1 or art2
   local dest="${CONFIG_DIR}/${instance}/artifactory.lic"
+  local license_text="" license_path=""
 
-  if [[ -n "${ARTIFACTORY_LICENSE_FILE:-}" ]]; then
-    if [[ ! -f "${ARTIFACTORY_LICENSE_FILE}" ]]; then
-      log_err "ARTIFACTORY_LICENSE_FILE is set but file not found: ${ARTIFACTORY_LICENSE_FILE}"
+  if [[ "${instance}" == "art2" ]]; then
+    license_text="${ARTIFACTORY_LICENSE_2:-}"
+    license_path="${ARTIFACTORY_LICENSE_FILE_2:-}"
+    if [[ -z "${license_text}" && -z "${license_path}" ]]; then
+      log_warn "ARTIFACTORY_LICENSE_2 not set — reusing art1 license for art2."
+      log_warn "JFrog will log a license conflict on art2. Lab still functional."
+      license_text="${ARTIFACTORY_LICENSE:-}"
+      license_path="${ARTIFACTORY_LICENSE_FILE:-}"
+    fi
+  else
+    license_text="${ARTIFACTORY_LICENSE:-}"
+    license_path="${ARTIFACTORY_LICENSE_FILE:-}"
+  fi
+
+  if [[ -n "${license_path}" ]]; then
+    if [[ ! -f "${license_path}" ]]; then
+      log_err "License file not found: ${license_path}"
       exit 1
     fi
-    cp "${ARTIFACTORY_LICENSE_FILE}" "${dest}"
-  elif [[ -n "${ARTIFACTORY_LICENSE:-}" ]]; then
-    printf '%b\n' "${ARTIFACTORY_LICENSE}" > "${dest}"
+    cp "${license_path}" "${dest}"
+  elif [[ -n "${license_text}" ]]; then
+    printf '%b\n' "${license_text}" > "${dest}"
   else
-    log_err "No Artifactory license configured. Set ARTIFACTORY_LICENSE or ARTIFACTORY_LICENSE_FILE in .env."
+    log_err "No Artifactory license configured for ${instance}. Set ARTIFACTORY_LICENSE (or _2 for art2) in .env."
     exit 1
   fi
   chmod 600 "${dest}"
@@ -124,6 +141,21 @@ load_selection() {
     USE_NGINX=0; USE_NGINX_HTTPS=0
     USE_LDAP=0; USE_KEYCLOAK=0; USE_XRAY=0
   fi
+}
+
+# ─── AF auth helper ──────────────────────────────────────────────────────────
+# Exchanges admin basic creds for a scoped bearer token. Used by post-up
+# configurators that hit /access/api/v1/* endpoints (which require Bearer
+# auth as of AF 7.100+).
+af_admin_token() {
+  local af_url="$1"  # e.g. http://localhost:8082
+  local user="${ADMIN_USER:-admin}"
+  local pass="${ADMIN_PASS:-${AF_ADMIN_PASSWORD:-password}}"
+  curl -sS -u "${user}:${pass}" \
+    -X POST -H 'Content-Type: application/json' \
+    --data '{"username":"admin","scope":"applied-permissions/admin","expires_in":3600,"refreshable":false}' \
+    "${af_url}/access/api/v1/tokens" \
+    | jq -r '.access_token'
 }
 
 # ─── Health checks ───────────────────────────────────────────────────────────

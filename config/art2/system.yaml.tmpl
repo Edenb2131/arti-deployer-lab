@@ -1,4 +1,5 @@
-## Artifactory 2 — system.yaml
+## Artifactory 2 — system.yaml (TEMPLATE)
+## Rendered by scripts/render-templates.sh from .env values.
 configVersion: 1
 
 shared:
@@ -11,8 +12,7 @@ shared:
     driver: org.postgresql.Driver
     url: jdbc:postgresql://postgres-art2:5432/artifactory
     username: artifactory
-    password: art2_dev_password
-  # ⚠ DEV-ONLY — same values as art1 so CoT bootstrap can succeed.
+    password: ${PG_AF2_PASSWORD}
   security:
-    joinKey: EEEE1111DDDD2222CCCC3333BBBB4444
-    masterKey: FFFF0000EEEE1111DDDD2222CCCC3333
+    joinKey: ${JOIN_KEY}
+    masterKey: ${MASTER_KEY}
