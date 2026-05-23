@@ -1,0 +1,84 @@
+{
+  "realm": "jfrog",
+  "enabled": true,
+  "displayName": "JFrog Lab",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "accessTokenLifespan": 1800,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "users": [
+    {
+      "username": "testuser",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "testuser@jfrog.local",
+      "firstName": "Test",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Password123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["default-roles-jfrog", "developer"]
+    },
+    {
+      "username": "kcadmin",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "kcadmin@jfrog.local",
+      "firstName": "KC",
+      "lastName": "Admin",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "Password123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["default-roles-jfrog", "admin-role"]
+    }
+  ],
+  "roles": {
+    "realm": [
+      {"name": "developer", "description": "Developer role"},
+      {"name": "admin-role", "description": "Admin role"}
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "artifactory",
+      "name": "Artifactory",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "artifactory-client-secret",
+      "redirectUris": [
+        "http://localhost:8081/*",
+        "http://localhost:8082/*",
+        "http://localhost:8080/*",
+        "https://localhost:8443/*",
+        "http://artifactory1:8082/*"
+      ],
+      "webOrigins": ["*"],
+      "protocol": "openid-connect",
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "attributes": {
+        "access.token.lifespan": "1800",
+        "post.logout.redirect.uris": "+"
+      }
+    }
+  ],
+  "defaultDefaultClientScopes": ["role_list", "profile", "email", "roles", "web-origins"],
+  "defaultOptionalClientScopes": ["offline_access", "address", "phone", "microprofile-jwt"]
+}
