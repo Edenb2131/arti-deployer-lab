@@ -46,19 +46,47 @@ fail_soft() {
 
 # ─── 1. Bearer tokens ────────────────────────────────────────────────────────
 log_step "Acquiring admin bearer tokens"
-TOKEN1=$(af_admin_token "${AF1_URL}")
-TOKEN2=$(af_admin_token "${AF2_URL}")
-if [[ -z "${TOKEN1}" || "${TOKEN1}" == "null" ]]; then
-  log_err "Could not get bearer token from art1 — check AF_ADMIN_PASSWORD in .env."
-  exit 1
-fi
-if [[ -z "${TOKEN2}" || "${TOKEN2}" == "null" ]]; then
-  log_err "Could not get bearer token from art2."
-  exit 1
-fi
+TOKEN1=$(af_admin_token "${AF1_URL}" 1)
+TOKEN2=$(af_admin_token "${AF2_URL}" 2)
+
+# Detect whether we have Access-API tokens (from .env) or just legacy
+# Artifactory tokens. We can tell by the audience claim — Access tokens
+# have aud=jfac@... or *@*, legacy tokens have aud=jfrt@...
+ACCESS_API_OK=1
+for tok in "${TOKEN1}" "${TOKEN2}"; do
+  if [[ -z "${tok}" || "${tok}" == "null" ]]; then
+    ACCESS_API_OK=0
+    continue
+  fi
+  aud=$(echo "${tok}" | cut -d. -f2 | tr '_-' '/+' | \
+    python3 -c "import sys,base64,json; s=sys.stdin.read().strip(); pad='='*(-len(s)%4); print(json.loads(base64.b64decode(s+pad)).get('aud',''))" 2>/dev/null)
+  case "${aud}" in
+    jfac@*|*@*) : ;;
+    *) ACCESS_API_OK=0 ;;
+  esac
+done
+
 HDR1=(-H "Authorization: Bearer ${TOKEN1}")
 HDR2=(-H "Authorization: Bearer ${TOKEN2}")
-log_ok "Bearer tokens acquired for both instances."
+
+if [[ "${ACCESS_API_OK}" == "1" ]]; then
+  log_ok "Access-API bearer tokens loaded from .env. Full CoT flow will run."
+else
+  log_warn "No AF{1,2}_ADMIN_ACCESS_TOKEN in .env (or audience is jfrt-only)."
+  log_warn "AF 7.146 won't let us bootstrap Access-API tokens from admin/password."
+  log_warn "→ We can still set base URLs and create federated repos via the legacy API."
+  log_warn "→ The Access-side trust exchange + JPD bind will be skipped — you'll need"
+  log_warn "  to either (a) generate admin Access tokens in the UI and paste into .env"
+  log_warn "  then re-run this script, or (b) configure CoT manually in the UI."
+  log_warn ""
+  log_warn "  How to generate the tokens (per instance):"
+  log_warn "    1. Open the AF UI (http://localhost:8082 for art1, :8182 for art2)"
+  log_warn "    2. Log in as admin (forced password change on first login)"
+  log_warn "    3. Administration → User Management → Access Tokens → Generate Token"
+  log_warn "    4. User Name=admin, Scope='Admin Privileges', generate, copy the token"
+  log_warn "    5. Paste into .env: AF1_ADMIN_ACCESS_TOKEN=... / AF2_ADMIN_ACCESS_TOKEN=..."
+  log_warn "    6. Re-run: bash scripts/configure-cot.sh"
+fi
 
 # ─── 2. Custom Base URLs ─────────────────────────────────────────────────────
 log_step "Setting Custom Base URLs"
@@ -80,6 +108,7 @@ set_base_url() {
 set_base_url "${AF1_URL}" "art1" "${AF1_INTERNAL}/artifactory" "${TOKEN1}"
 set_base_url "${AF2_URL}" "art2" "${AF2_INTERNAL}/artifactory" "${TOKEN2}"
 
+if [[ "${ACCESS_API_OK}" == "1" ]]; then
 # ─── 3. Fetch each instance's Access root certificate ────────────────────────
 log_step "Fetching Access root certificates"
 CERT1=$(curl -sS "${HDR1[@]}" "${AF1_URL}/access/api/v1/system/root_certificate") || \
@@ -172,6 +201,8 @@ if curl -sS "${HDR1[@]}" "${AF1_URL}/access/api/v1/system/jpd" >/tmp/af-jpd.json
     cat /tmp/af-jpd.json | head -20
 fi
 
+fi  # end of ACCESS_API_OK gate (steps 3-5 require Access tokens)
+
 # ─── 6. Sample federated repos ───────────────────────────────────────────────
 # Both members use the docker-internal hostname so AF can reach the other
 # side over the bridge net. localhost:81xx WILL NOT WORK from inside the
@@ -213,12 +244,15 @@ create_federated_repo "docker-fed"  "docker"
 
 touch "${MARKER}"
 echo
-log_ok "CoT + Access Federation bootstrap finished."
+if [[ "${ACCESS_API_OK}" == "1" ]]; then
+  log_ok "CoT + Access Federation bootstrap finished."
+else
+  log_ok "Base URLs set + federated repos created (Access-side trust SKIPPED — see warnings above)."
+fi
 echo
 log_info "Verify in UI:"
-log_info "  art1 → Administration → User Management → Access Federation"
-log_info "  art1 → Repositories → generic-fed (Federation tab → members)"
-log_info "  art1 → Repositories → docker-fed   (Federation tab → members)"
+log_info "  art1 → Administration → Repositories → generic-fed (Federation tab → members)"
+log_info "  art1 → Administration → Repositories → docker-fed  (Federation tab → members)"
 echo
 log_info "Adding more federated members manually? Use docker-internal URLs:"
 log_info "  ✓  http://artifactory2:8082/artifactory/<repo>"

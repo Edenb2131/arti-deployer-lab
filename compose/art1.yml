@@ -44,6 +44,12 @@ services:
       JF_SHARED_DATABASE_PASSWORD: ${PG_AF1_PASSWORD}
       JF_SHARED_NODE_ID: art1
       JF_SHARED_NODE_NAME: art1
+      # Point AF at the system.yaml drop-in directly. AF's first-boot
+      # copies /artifactory_extra_conf/* to /var/opt/jfrog/artifactory/etc/
+      # which is NOT where system.yaml is read from (var/etc/). Setting
+      # JF_SYSTEM_YAML to the source path bypasses the copy and AF reads
+      # the file from our bind mount — so mc.enabled actually takes effect.
+      JF_SYSTEM_YAML: /artifactory_extra_conf/system.yaml
     ports:
       - "${AF1_HTTP_PORT}:8081"
       - "${AF1_ROUTER_PORT}:8082"

@@ -160,18 +160,41 @@ load_selection() {
 }
 
 # ─── AF auth helper ──────────────────────────────────────────────────────────
-# Exchanges admin basic creds for a scoped bearer token. Used by post-up
-# configurators that hit /access/api/v1/* endpoints (which require Bearer
-# auth as of AF 7.100+).
+# In AF 7.146 there is no way to bootstrap an Access-API admin token from
+# just admin/password — the Access endpoint /access/api/v1/tokens rejects
+# Basic auth ("Unsupported authentication method Basic"), and the legacy
+# Artifactory token endpoint refuses to mint a token with `audience=jfac@*`
+# ("Illegal audience: jfac@*, audience can contain only service IDs of
+# Artifactory servers").
+#
+# Practical path: user generates an admin Access token via the UI once,
+# pastes it into .env (AF1_ADMIN_ACCESS_TOKEN / AF2_ADMIN_ACCESS_TOKEN),
+# and this helper hands it back. If the env var is empty we fall back to
+# the legacy token (works for /artifactory/api/* endpoints only — Access
+# calls will still 401).
+#
+# Args: $1 = af_url (e.g. http://localhost:8082)
+#       $2 = which instance (1 or 2) — picks the right env var
 af_admin_token() {
-  local af_url="$1"  # e.g. http://localhost:8082
+  local af_url="$1"
+  local which="${2:-1}"
+  local env_var
+  if [[ "${which}" == "2" ]]; then env_var="AF2_ADMIN_ACCESS_TOKEN"
+  else                              env_var="AF1_ADMIN_ACCESS_TOKEN"
+  fi
+  local pre_token="${!env_var:-}"
+  if [[ -n "${pre_token}" ]]; then
+    printf '%s' "${pre_token}"
+    return 0
+  fi
+  # Fallback: legacy Artifactory token (works for /artifactory/api/* only)
   local user="${ADMIN_USER:-admin}"
   local pass="${ADMIN_PASS:-${AF_ADMIN_PASSWORD:-password}}"
   curl -sS -u "${user}:${pass}" \
-    -X POST -H 'Content-Type: application/json' \
-    --data '{"username":"admin","scope":"applied-permissions/admin","expires_in":3600,"refreshable":false}' \
-    "${af_url}/access/api/v1/tokens" \
-    | jq -r '.access_token'
+    -X POST \
+    --data "username=admin&scope=member-of-groups:*&audience=*&expires_in=3600&refreshable=true" \
+    "${af_url}/artifactory/api/security/token" \
+    | jq -r '.access_token // empty'
 }
 
 # ─── Health checks ───────────────────────────────────────────────────────────
