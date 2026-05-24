@@ -159,13 +159,15 @@ af_admin_token() {
 }
 
 # ─── Health checks ───────────────────────────────────────────────────────────
-# Polls AF router health endpoint until 200 or timeout (default 5 min).
+# Polls AF's /api/system/ping until 200 or timeout (default 10 min, since
+# first boot is 5-7 min). The host_port arg should be the AF legacy HTTP
+# port (8081 default) — that's where /artifactory/api/system/ping lives.
 wait_for_af() {
   local port="$1"
   local label="$2"
-  local timeout="${3:-300}"
+  local timeout="${3:-600}"
   local elapsed=0
-  local url="http://localhost:${port}/router/api/v1/system/health"
+  local url="http://localhost:${port}/artifactory/api/system/ping"
 
   log_info "Waiting for ${label} at ${url} ..."
   while (( elapsed < timeout )); do
