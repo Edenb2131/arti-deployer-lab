@@ -22,6 +22,97 @@ source "$(cd "$(dirname "$0")" && pwd)/scripts/lib.sh"
 
 cmd="${1:-up}"
 
+# ─── wizard helpers ──────────────────────────────────────────────────────────
+wizard_af_version() {
+  log_step "Artifactory version"
+  log_info "Current AF_VERSION in .env: ${AF_VERSION}"
+  if gum confirm "Use this version?"; then
+    return
+  fi
+  local new_ver
+  new_ver=$(gum input --prompt "Artifactory version: " --value "${AF_VERSION}" --placeholder "e.g., 7.111.9")
+  if [[ -n "${new_ver}" && "${new_ver}" != "${AF_VERSION}" ]]; then
+    update_env_var "AF_VERSION" "${new_ver}"
+    log_ok "Updated .env: AF_VERSION=${new_ver}"
+  fi
+}
+
+# wizard_one_license <1|2>
+wizard_one_license() {
+  local n="$1"
+  local var_lic var_file
+  if [[ "${n}" == "1" ]]; then
+    var_lic="ARTIFACTORY_LICENSE"; var_file="ARTIFACTORY_LICENSE_FILE"
+  else
+    var_lic="ARTIFACTORY_LICENSE_2"; var_file="ARTIFACTORY_LICENSE_FILE_2"
+  fi
+  local cur_lic="${!var_lic:-}"
+  local cur_file="${!var_file:-}"
+
+  local status="not set"
+  if [[ -n "${cur_file}" ]]; then
+    status="file: ${cur_file}"
+  elif [[ -n "${cur_lic}" ]]; then
+    status="inline (${#cur_lic} chars)"
+  fi
+  log_info "Artifactory #${n} license: ${status}"
+
+  local pick
+  if [[ "${status}" != "not set" ]]; then
+    pick=$(gum choose --header "License for AF#${n}:" \
+      "Keep current" \
+      "Paste a new license" \
+      "Point to a license file" \
+      "Clear")
+  else
+    pick=$(gum choose --header "License for AF#${n} (no value in .env):" \
+      "Paste a license now" \
+      "Point to a license file" \
+      "Skip (AF will fail to start)")
+  fi
+
+  case "${pick}" in
+    "Keep current") return ;;
+    "Paste"*)
+      log_info "Editor opens. Paste license content, then Ctrl+D to save."
+      local lic_content
+      lic_content=$(gum write --placeholder "Paste license (multi-line OK). Ctrl+D to save, Esc to cancel." --width 90 --height 18)
+      if [[ -z "${lic_content}" ]]; then
+        log_warn "Empty input; leaving license #${n} unchanged."
+        return
+      fi
+      local lic_dir="${ROOT_DIR}/.licenses"
+      mkdir -p "${lic_dir}" && chmod 700 "${lic_dir}"
+      local lic_path="${lic_dir}/license-${n}.lic"
+      printf '%s' "${lic_content}" > "${lic_path}"
+      chmod 600 "${lic_path}"
+      update_env_var "${var_file}" "${lic_path}"
+      update_env_var "${var_lic}"  ""
+      log_ok "Saved license to ${lic_path} and pointed ${var_file} at it in .env."
+      ;;
+    "Point"*)
+      local path
+      path=$(gum input --prompt "Absolute path to license file: " --placeholder "/path/to/artifactory.lic")
+      if [[ -n "${path}" ]]; then
+        if [[ ! -f "${path}" ]]; then
+          log_warn "File not found at ${path}; setting anyway, fix before 'up'."
+        fi
+        update_env_var "${var_file}" "${path}"
+        update_env_var "${var_lic}"  ""
+        log_ok "Updated .env: ${var_file}=${path}"
+      fi
+      ;;
+    "Clear")
+      update_env_var "${var_lic}"  ""
+      update_env_var "${var_file}" ""
+      log_warn "Cleared both ${var_lic} and ${var_file} in .env."
+      ;;
+    "Skip"*)
+      log_warn "AF#${n} will fail without a license; continuing anyway."
+      ;;
+  esac
+}
+
 # ─── wizard ──────────────────────────────────────────────────────────────────
 wizard() {
   log_step "arti-deployer wizard"
@@ -59,11 +150,22 @@ wizard() {
     USE_XRAY=1
   fi
 
+  # 4. Artifactory version
+  wizard_af_version
+
+  # 5. Licenses (one per instance)
+  log_step "Artifactory license(s)"
+  wizard_one_license 1
+  if [[ "${INSTANCE_COUNT}" == "2" ]]; then
+    wizard_one_license 2
+  fi
+
   # Show summary + confirm
   echo
   gum style --border rounded --padding "0 2" --border-foreground 51 \
 "Selection:
   Instances:      ${INSTANCE_COUNT}
+  AF version:     ${AF_VERSION}
   NGINX:          $([[ "${USE_NGINX}" == "1" ]] && echo "yes ($([[ "${USE_NGINX_HTTPS}" == "1" ]] && echo "HTTPS" || echo "HTTP"))" || echo no)
   LDAP:           $([[ "${USE_LDAP}" == "1" ]] && echo yes || echo no)
   Keycloak:       $([[ "${USE_KEYCLOAK}" == "1" ]] && echo yes || echo no)

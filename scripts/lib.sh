@@ -55,6 +55,25 @@ load_env() {
   set -a; source "${ROOT_DIR}/.env"; set +a
 }
 
+# ─── .env updater ────────────────────────────────────────────────────────────
+# Writes KEY=VAL in .env (replaces existing line or appends). Also updates
+# the in-memory variable so subsequent steps in the same run see the change.
+update_env_var() {
+  local key="$1" val="$2"
+  local env_file="${ROOT_DIR}/.env"
+  # Escape sed delimiters in the replacement
+  local esc
+  esc=$(printf '%s' "${val}" | sed -e 's/[\/&|]/\\&/g')
+  if grep -q "^${key}=" "${env_file}" 2>/dev/null; then
+    sed -i.bak "s|^${key}=.*|${key}=${esc}|" "${env_file}" && rm -f "${env_file}.bak"
+  else
+    printf '%s=%s\n' "${key}" "${val}" >> "${env_file}"
+  fi
+  # Mirror in-memory for the rest of this run
+  printf -v "${key}" '%s' "${val}"
+  export "${key}"
+}
+
 # ─── License handling ────────────────────────────────────────────────────────
 # Writes config/<instance>/artifactory.lic from .env. Errors if no license set.
 # For art2, prefers ARTIFACTORY_LICENSE_2 / ARTIFACTORY_LICENSE_FILE_2 and

@@ -4,6 +4,7 @@
 *.lic
 artifactory.lic
 xray.lic
+.licenses/
 
 # Rendered configs (templates are committed as *.tmpl; outputs are local-only)
 config/art1/system.yaml
