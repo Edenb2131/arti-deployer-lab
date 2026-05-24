@@ -41,17 +41,21 @@ for arg in "$@"; do
 done
 
 # ─── Plan ────────────────────────────────────────────────────────────────────
-declare -a CONTAINERS VOLUMES NETWORKS
-
-mapfile -t CONTAINERS < <(
+# macOS bash 3.2 has no mapfile — read with a while loop for portability.
+CONTAINERS=()
+while IFS= read -r line; do [[ -n "$line" ]] && CONTAINERS+=("$line"); done < <(
   docker ps -aq --filter 'name=artifactory1' --filter 'name=artifactory2' \
                 --filter 'name=postgres-art1' --filter 'name=postgres-art2' \
                 --filter 'name=arti-nginx' --filter 'name=arti-openldap' \
                 --filter 'name=arti-keycloak' \
     2>/dev/null
 )
-mapfile -t VOLUMES  < <(docker volume ls -q  --filter 'name=arti-deployer_' 2>/dev/null)
-mapfile -t NETWORKS < <(docker network ls -q --filter 'name=arti-deployer_' 2>/dev/null)
+VOLUMES=()
+while IFS= read -r line; do [[ -n "$line" ]] && VOLUMES+=("$line"); done \
+  < <(docker volume ls -q  --filter 'name=arti-deployer_' 2>/dev/null)
+NETWORKS=()
+while IFS= read -r line; do [[ -n "$line" ]] && NETWORKS+=("$line"); done \
+  < <(docker network ls -q --filter 'name=arti-deployer_' 2>/dev/null)
 
 # ─── Show plan + confirm ─────────────────────────────────────────────────────
 log_step "Cleanup plan"
