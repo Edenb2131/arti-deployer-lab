@@ -125,81 +125,36 @@ set_base_url() {
 set_base_url "${AF1_URL}" "art1" "${AF1_INTERNAL}/artifactory"
 set_base_url "${AF2_URL}" "art2" "${AF2_INTERNAL}/artifactory"
 
-# ─── 4. Register peer JPD on each side (direct DB insert) ────────────────────
-# The /mc/api/v1/jpds POST API is gated behind a "join token" handshake
-# only the standalone Mission Control product can satisfy. AF Pro's
-# embedded mc microservice reads JPDs from postgres on the next refresh,
-# so we INSERT directly. CoT in step 1 gives the AFs the cryptographic
-# trust to actually talk to each other; the DB row is just the metadata
-# that makes the UI surface them.
-log_step "Registering peer JPDs (direct DB insert)"
-
-register_peer_jpd() {
-  local local_pg="$1" local_pg_label="$2"
-  local peer_pg="$3" peer_name="$4" peer_url="$5" peer_hash="$6"
-
-  # 1. mc_jpd + mc_custom_jpd_url — peer's identity
-  docker exec "${local_pg}" psql -U artifactory -d artifactory -v ON_ERROR_STOP=1 \
-    -c "INSERT INTO mc_jpd (id, jpd_id, jpd_name, url, jpd_hash, registration_time, location_city_name, location_country_code, location_latitude, location_longitude, saas, legacy)
-        SELECT gen_random_uuid(), 2, '${peer_name}', '${peer_url}', '${peer_hash}',
-               (extract(epoch from now())::bigint * 1000),
-               'docker', 'GL', 0, 0, 0, 0
-        WHERE NOT EXISTS (SELECT 1 FROM mc_jpd WHERE jpd_name = '${peer_name}');
-        INSERT INTO mc_custom_jpd_url (id, jpd_id_ref, url)
-        SELECT gen_random_uuid(), 2, '${peer_url}'
-        WHERE NOT EXISTS (SELECT 1 FROM mc_custom_jpd_url WHERE jpd_id_ref = 2);" >/dev/null 2>&1
-
-  # 2. mc_service + mc_service_node — peer's actual JFrog services
-  # Without these rows the UI marks the JPD UNAVAILABLE and the
-  # federated-repo "Deployments" dropdown filters it out.
-  # We replicate the peer's service inventory into our DB tagged
-  # with jpd_id_ref=2 (the peer's row above).
-  local services_tmp nodes_tmp
-  services_tmp=$(mktemp)
-  nodes_tmp=$(mktemp)
-  docker exec "${peer_pg}" psql -U artifactory -d artifactory -t -A -F'|' \
-    -c "SELECT service_id, service_type, COALESCE(version,''), COALESCE(revision,'') FROM mc_service WHERE jpd_id_ref=1;" \
-    > "${services_tmp}"
-  docker exec "${peer_pg}" psql -U artifactory -d artifactory -t -A -F'|' \
-    -c "SELECT service_id_ref, node_id, node_state FROM mc_service_node;" \
-    > "${nodes_tmp}"
-
-  while IFS='|' read -r sid stype ver rev; do
-    [[ -z "${sid}" ]] && continue
-    docker exec "${local_pg}" psql -U artifactory -d artifactory \
-      -c "INSERT INTO mc_service (id, jpd_id_ref, service_id, service_type, version, revision)
-          VALUES (gen_random_uuid(), 2, '${sid}', '${stype}', NULLIF('${ver}',''), NULLIF('${rev}',''))
-          ON CONFLICT (service_id) DO NOTHING;" >/dev/null 2>&1
-  done < "${services_tmp}"
-
-  while IFS='|' read -r sid_ref nid state; do
-    [[ -z "${sid_ref}" ]] && continue
-    docker exec "${local_pg}" psql -U artifactory -d artifactory \
-      -c "INSERT INTO mc_service_node (id, service_id_ref, node_id, node_state)
-          VALUES (gen_random_uuid(), '${sid_ref}', '${nid}', '${state}')
-          ON CONFLICT (service_id_ref, node_id) DO NOTHING;" >/dev/null 2>&1
-  done < "${nodes_tmp}"
-
-  local svc_count
-  svc_count=$(wc -l < "${services_tmp}" 2>/dev/null || echo 0)
-  rm -f "${services_tmp}" "${nodes_tmp}"
-  log_ok "${local_pg_label}: peer '${peer_name}' registered with mc_service x${svc_count}."
-}
-
-ART1_HASH=$(docker exec postgres-art1 psql -U artifactory -d artifactory -t -A -c "SELECT jpd_hash FROM mc_jpd WHERE jpd_id=1;")
-ART2_HASH=$(docker exec postgres-art2 psql -U artifactory -d artifactory -t -A -c "SELECT jpd_hash FROM mc_jpd WHERE jpd_id=1;")
-
-register_peer_jpd postgres-art1 art1 postgres-art2 "art2" "${AF2_INTERNAL}/" "${ART2_HASH}"
-register_peer_jpd postgres-art2 art2 postgres-art1 "art1" "${AF1_INTERNAL}/" "${ART1_HASH}"
-
-log_info "JPDs visible on art1:"
-curl -sS -H "Authorization: Bearer ${TOKEN1}" "${AF1_URL}/mc/api/v1/jpds" 2>/dev/null \
-  | jq -r '.[] | "  • \(.id) — \(.name) @ \(.base_url // .url)  (local=\(.local))"' || true
-log_info "JPDs visible on art2:"
-curl -sS -H "Authorization: Bearer ${TOKEN2}" "${AF2_URL}/mc/api/v1/jpds" 2>/dev/null \
-  | jq -r '.[] | "  • \(.id) — \(.name) @ \(.base_url // .url)  (local=\(.local))"' || true
-
-# ─── 5. Verify federation via temporary repo (no persistent demo state) ─────
+# ─── 4. JPD pairing — what we attempted and why it's left out ──────────────
+# What I tried:
+#   a) POST /mc/api/v1/jpds with every combination of {token, joinKey,
+#      username/password, pairing_token, pairingToken}. Every combo gets
+#      either "Provide either a token or a username/password pair." or
+#      "Failed to join the JPD. Are the credentials correct?". The
+#      embedded mc microservice does an Access cluster-join against the
+#      peer and that step requires credentials only a standalone
+#      Mission Control deployment can produce.
+#   b) Direct INSERT into mc_jpd + mc_service + mc_service_node. Made
+#      GET /mc/api/v1/jpds report the peer as ONLINE — BUT the Admin →
+#      Topology → JPD Services UI then renders blank because the JS
+#      bundle expects coherent data across mc_jpd_edge_status + license
+#      tables that we didn't populate (frontend-service.log fills with
+#      "missing statusEvaluationTimeMs" WARNs for every node).
+#
+# Conclusion: full multi-JPD visibility in the Topology UI + the
+# federated-repo "Add Members → Deployments" dropdown requires the
+# standalone JFrog Mission Control product (jfrog/mission-control:*),
+# not just mc.enabled in AF Pro. Federation ITSELF works without it:
+# CoT (step 1) + Base URL (step 3) is enough for cross-JPD replication
+# to flow. Verified live: clean DB, no JPD entries, replication still
+# completes in ~30-40s.
+#
+# When you create federated repos in the UI, the "Deployments" tab will
+# say "Remote JPDs not found". Use the "URL" tab instead and enter the
+# peer's docker-internal URL manually:
+#     http://artifactory2:8082/artifactory/<repo>   from art1
+#     http://artifactory1:8082/artifactory/<repo>   from art2
+# Or create the repos via API as we do in the smoke test below.
 log_step "Verifying federation replication (ephemeral repo)"
 
 SMOKE_REPO="arti-deployer-cot-smoke"
@@ -252,12 +207,16 @@ rm -f "${test_payload}"
 
 touch "${MARKER}"
 echo
-log_ok "Federation setup complete — both AFs trust each other, peer JPDs are"
-log_ok "registered, and replication is verified. No demo repos left behind."
+log_ok "Federation setup complete — both AFs trust each other and replication"
+log_ok "is verified. No demo repos left behind."
 echo
-log_info "Next steps:"
-log_info "  • Open art1 → Administration → Topology → Topology Overview"
-log_info "  • Create a federated repo and pick art2 in the members dropdown"
-log_info "    (members must use docker-internal URLs:"
+log_info "Creating federated repos:"
+log_info "  • In the UI: Repositories → Federated → switch to the 'URL' tab"
+log_info "    (the 'Deployments' tab will say 'Remote JPDs not found' —"
+log_info "    that's expected without standalone Mission Control)"
+log_info "  • Enter the peer using its docker-internal URL:"
 log_info "      ✓ http://artifactory2:8082/artifactory/<repo>"
-log_info "      ✗ http://localhost:8182/artifactory/<repo>)"
+log_info "      ✗ http://localhost:8182/artifactory/<repo>"
+log_info ""
+log_info "Or create via API — see scripts/configure-cot.sh smoke test for the"
+log_info "exact PUT payload."
