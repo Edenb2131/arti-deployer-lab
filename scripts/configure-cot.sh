@@ -47,6 +47,7 @@ ADMIN_USER="admin"
 ADMIN_PASS="${AF_ADMIN_PASSWORD:-password}"
 KEYS_DIR="/var/opt/jfrog/artifactory/etc/access/keys"
 
+mkdir -p "${STATE_DIR}"
 MARKER="${STATE_DIR}/.cot-configured"
 if [[ -f "${MARKER}" ]]; then
   log_info "CoT already configured. Delete ${MARKER} to re-run."
@@ -134,8 +135,11 @@ set_base_url "${AF2_URL}" "art2" "${AF2_INTERNAL}/artifactory"
 log_step "Registering peer JPDs (direct DB insert)"
 
 register_peer_jpd() {
-  local pg_container="$1" peer_name="$2" peer_url="$3" peer_hash="$4"
-  docker exec "${pg_container}" psql -U artifactory -d artifactory -v ON_ERROR_STOP=1 \
+  local local_pg="$1" local_pg_label="$2"
+  local peer_pg="$3" peer_name="$4" peer_url="$5" peer_hash="$6"
+
+  # 1. mc_jpd + mc_custom_jpd_url — peer's identity
+  docker exec "${local_pg}" psql -U artifactory -d artifactory -v ON_ERROR_STOP=1 \
     -c "INSERT INTO mc_jpd (id, jpd_id, jpd_name, url, jpd_hash, registration_time, location_city_name, location_country_code, location_latitude, location_longitude, saas, legacy)
         SELECT gen_random_uuid(), 2, '${peer_name}', '${peer_url}', '${peer_hash}',
                (extract(epoch from now())::bigint * 1000),
@@ -144,13 +148,49 @@ register_peer_jpd() {
         INSERT INTO mc_custom_jpd_url (id, jpd_id_ref, url)
         SELECT gen_random_uuid(), 2, '${peer_url}'
         WHERE NOT EXISTS (SELECT 1 FROM mc_custom_jpd_url WHERE jpd_id_ref = 2);" >/dev/null 2>&1
+
+  # 2. mc_service + mc_service_node — peer's actual JFrog services
+  # Without these rows the UI marks the JPD UNAVAILABLE and the
+  # federated-repo "Deployments" dropdown filters it out.
+  # We replicate the peer's service inventory into our DB tagged
+  # with jpd_id_ref=2 (the peer's row above).
+  local services_tmp nodes_tmp
+  services_tmp=$(mktemp)
+  nodes_tmp=$(mktemp)
+  docker exec "${peer_pg}" psql -U artifactory -d artifactory -t -A -F'|' \
+    -c "SELECT service_id, service_type, COALESCE(version,''), COALESCE(revision,'') FROM mc_service WHERE jpd_id_ref=1;" \
+    > "${services_tmp}"
+  docker exec "${peer_pg}" psql -U artifactory -d artifactory -t -A -F'|' \
+    -c "SELECT service_id_ref, node_id, node_state FROM mc_service_node;" \
+    > "${nodes_tmp}"
+
+  while IFS='|' read -r sid stype ver rev; do
+    [[ -z "${sid}" ]] && continue
+    docker exec "${local_pg}" psql -U artifactory -d artifactory \
+      -c "INSERT INTO mc_service (id, jpd_id_ref, service_id, service_type, version, revision)
+          VALUES (gen_random_uuid(), 2, '${sid}', '${stype}', NULLIF('${ver}',''), NULLIF('${rev}',''))
+          ON CONFLICT (service_id) DO NOTHING;" >/dev/null 2>&1
+  done < "${services_tmp}"
+
+  while IFS='|' read -r sid_ref nid state; do
+    [[ -z "${sid_ref}" ]] && continue
+    docker exec "${local_pg}" psql -U artifactory -d artifactory \
+      -c "INSERT INTO mc_service_node (id, service_id_ref, node_id, node_state)
+          VALUES (gen_random_uuid(), '${sid_ref}', '${nid}', '${state}')
+          ON CONFLICT (service_id_ref, node_id) DO NOTHING;" >/dev/null 2>&1
+  done < "${nodes_tmp}"
+
+  local svc_count
+  svc_count=$(wc -l < "${services_tmp}" 2>/dev/null || echo 0)
+  rm -f "${services_tmp}" "${nodes_tmp}"
+  log_ok "${local_pg_label}: peer '${peer_name}' registered with mc_service x${svc_count}."
 }
 
 ART1_HASH=$(docker exec postgres-art1 psql -U artifactory -d artifactory -t -A -c "SELECT jpd_hash FROM mc_jpd WHERE jpd_id=1;")
 ART2_HASH=$(docker exec postgres-art2 psql -U artifactory -d artifactory -t -A -c "SELECT jpd_hash FROM mc_jpd WHERE jpd_id=1;")
 
-register_peer_jpd postgres-art1 "art2" "${AF2_INTERNAL}/" "${ART2_HASH}"
-register_peer_jpd postgres-art2 "art1" "${AF1_INTERNAL}/" "${ART1_HASH}"
+register_peer_jpd postgres-art1 art1 postgres-art2 "art2" "${AF2_INTERNAL}/" "${ART2_HASH}"
+register_peer_jpd postgres-art2 art2 postgres-art1 "art1" "${AF1_INTERNAL}/" "${ART1_HASH}"
 
 log_info "JPDs visible on art1:"
 curl -sS -H "Authorization: Bearer ${TOKEN1}" "${AF1_URL}/mc/api/v1/jpds" 2>/dev/null \
