@@ -48,8 +48,13 @@ services:
       # copies /artifactory_extra_conf/* to /var/opt/jfrog/artifactory/etc/
       # which is NOT where system.yaml is read from (var/etc/). Setting
       # JF_SYSTEM_YAML to the source path bypasses the copy and AF reads
-      # the file from our bind mount — so mc.enabled actually takes effect.
+      # the file from our bind mount.
       JF_SYSTEM_YAML: /artifactory_extra_conf/system.yaml
+      # Belt-and-suspenders: env var directly turns Mission Control on
+      # so JPDs / Topology page populate. The system.yaml also sets it,
+      # but the env var ensures it's applied even if the YAML didn't
+      # parse for any reason.
+      JF_MC_ENABLED: "true"
     ports:
       - "${AF1_HTTP_PORT}:8081"
       - "${AF1_ROUTER_PORT}:8082"

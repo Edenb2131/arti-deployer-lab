@@ -241,7 +241,24 @@ cmd_up() {
   # shellcheck disable=SC2046
   docker compose $(build_compose_chain) up -d
 
-  log_step "Waiting for Artifactory health"
+  log_step "Waiting for Artifactory health (first boot)"
+  wait_for_af "${AF1_HTTP_PORT}" "Artifactory 1"
+  if [[ "${INSTANCE_COUNT}" == "2" ]]; then
+    wait_for_af "${AF2_HTTP_PORT}" "Artifactory 2"
+  fi
+
+  # Restart Artifactory so Mission Control activates. mc.enabled in
+  # system.yaml + JF_MC_ENABLED env var are read at startup, but on the
+  # very first boot AF is still bootstrapping its data volume — the
+  # internal service registry that hosts the mc microservice + the
+  # Topology UI page needs the restart to register MC as a healthy peer.
+  # After this restart, Administration → Topology shows registered JPDs.
+  log_step "Restarting Artifactory to activate Mission Control"
+  docker restart artifactory1 >/dev/null
+  if [[ "${INSTANCE_COUNT}" == "2" ]]; then
+    docker restart artifactory2 >/dev/null
+  fi
+  log_info "Waiting for Artifactory health (post-MC-restart, ~3-4 min)..."
   wait_for_af "${AF1_HTTP_PORT}" "Artifactory 1"
   if [[ "${INSTANCE_COUNT}" == "2" ]]; then
     wait_for_af "${AF2_HTTP_PORT}" "Artifactory 2"
