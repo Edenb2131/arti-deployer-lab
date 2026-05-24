@@ -124,28 +124,25 @@ wizard() {
     "2  (auto-configures CoT + Access Federation)")
   INSTANCE_COUNT="${count_choice%% *}"
 
-  # 2. Configurations (multi-select)
-  local configs
-  configs=$(gum choose --no-limit \
-    --header "Pick configurations (space to toggle, enter to confirm):" \
-    "NGINX (reverse proxy)" \
-    "LDAP" \
-    "Keycloak (OIDC)" || true)
+  # 2. Configurations — separate yes/no per overlay (clearer than a multi-
+  #    select where users sometimes press Enter without toggling first).
+  USE_NGINX=0; USE_LDAP=0; USE_KEYCLOAK=0; USE_NGINX_HTTPS=0; USE_XRAY=0
 
-  USE_NGINX=0; USE_LDAP=0; USE_KEYCLOAK=0; USE_NGINX_HTTPS=0
-  grep -q "NGINX"    <<< "${configs}" && USE_NGINX=1
-  grep -q "LDAP"     <<< "${configs}" && USE_LDAP=1
-  grep -q "Keycloak" <<< "${configs}" && USE_KEYCLOAK=1
-
-  # 2a. HTTPS sub-choice
-  if [[ "${USE_NGINX}" == "1" ]]; then
+  if gum confirm "Add NGINX reverse proxy?"; then
+    USE_NGINX=1
     if gum confirm "Use HTTPS for NGINX? (self-signed cert)"; then
       USE_NGINX_HTTPS=1
     fi
   fi
 
-  # 3. Xray
-  USE_XRAY=0
+  if gum confirm "Add LDAP server?"; then
+    USE_LDAP=1
+  fi
+
+  if gum confirm "Add Keycloak (OIDC) provider?"; then
+    USE_KEYCLOAK=1
+  fi
+
   if gum confirm "Deploy Xray as well?"; then
     USE_XRAY=1
   fi
