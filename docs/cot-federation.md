@@ -1,122 +1,169 @@
-# Two instances + Circle of Trust + Access Federation
+# Two instances + Circle of Trust + Federation
 
-When the wizard picks **2 instances**, the CLI runs `configure-cot.sh` after
-both Artifactories are healthy. That script does six things:
+When the wizard picks **2 instances**, `arti-deployer up` runs
+`scripts/configure-cot.sh` after both AFs are healthy. That gives you a
+working federation between art1 and art2 using only `admin/password`
+auth — no manual UI clicks.
 
-1. **Bearer tokens** — exchanges admin basic creds for short-lived Access
-   tokens (`POST /access/api/v1/tokens`). Required for the rest of the flow:
-   `/access/api/v1/*` rejects basic auth in AF 7.100+.
-2. **Custom Base URLs** — sets each AF's base URL to its docker-internal
-   hostname (`http://artifactory1:8082/artifactory`,
-   `http://artifactory2:8082/artifactory`). Federated repos refuse to be
-   created without this.
-3. **Root certs** — fetches each AF's Access root cert.
-4. **Cross-trust** — `POST /access/api/v1/system/trusted_keys` on each AF
-   with the other's cert. This is the cryptographic CoT handshake.
-5. **JPD pairing** — generates a pairing token on art1
-   (`POST /access/api/v1/system/jpd/pair`) and consumes it on art2
-   (`POST /access/api/v1/system/jpd/bind`). Falls back to the older
-   topology `federation_target` endpoint if the modern one isn't available.
-6. **Smoke test repos** — creates `generic-fed` and `docker-fed` federated
-   repos on art1 with both AFs as members, using the correct docker-internal
-   URLs.
+## What the script does (in order)
+
+1. **Filesystem Circle of Trust.** Cross-copies each AF's
+   `/var/opt/jfrog/artifactory/etc/access/keys/root.crt` into the other
+   AF's `etc/access/keys/trusted/` directory via `docker cp`. Access
+   auto-ingests the cert within ~15-30s (the file vanishes from
+   `trusted/` once imported). This is the entire CoT mechanism — it's a
+   filesystem operation, not an API call. Confirmed by the JFrog docs
+   step "Creating Circle of Trust".
+
+2. **Bootstrap Access admin tokens.** Each AF generates its own
+   `jfmc@<id>.token` on first boot at
+   `/var/opt/jfrog/artifactory/work/mc/temp/access-client-config-store/*/keys/jfmc@*.token`.
+   The script reads that file via `docker exec` and uses it to mint a
+   `*@*` admin Access token via `POST /access/api/v1/tokens`. That
+   bearer is then good for any Access or MC REST call. (AF 7.100+
+   rejects Basic auth on `/access/api/v1/*` and the legacy Artifactory
+   token endpoint refuses to mint Access-audience tokens from admin
+   credentials, so this is the only path.)
+
+3. **Custom Base URLs.** PUTs each AF's docker-internal hostname to
+   `/artifactory/api/system/configuration/baseUrl`. Federation refuses
+   to operate without one.
+
+4. **Smoke test.** Creates a temporary federated repo
+   `arti-deployer-cot-smoke`, uploads a file to art1, polls art2 until
+   the file appears, then deletes the repo and file on both sides. So
+   the script verifies federation actually replicates without leaving
+   demo state behind.
+
+After this runs, you can push to `art1` and pull from `art2` (or vice
+versa) using any federated repo whose members point at the docker
+hostnames.
 
 ## ⚠️ The federation member URL gotcha
 
-When you add a federation member in the UI, you'll see something like:
+When you create a federated repo in the UI, the URL you enter for a
+member matters:
 
 ```
 URL: http://localhost:8182/artifactory/my-fed-repo
         ↑                  ↑
-    WRONG — AF can't       The host port (8182 = AF2 from your laptop's
-    reach 'localhost'      browser). But AF1 talks to AF2 over the docker
-    on host port from      bridge, not via your host's published ports.
-    inside its container
+    WRONG — AF can't       The host port (8182 = art2 from your
+    reach 'localhost'      laptop's browser). But art1 talks to art2
+    on host port from      over the docker bridge, not via your host's
+    inside its container   published ports.
 ```
 
-…and it'll fail with:
+…and you'll see:
 
 ```
 ✗ Connect to localhost:8182 [localhost/127.0.0.1, localhost/0:0:0:0:0:0:0:1]
   failed: Connection refused
 ```
 
-**The fix:** always use the docker-internal hostname for federation member
-URLs:
+**The fix:** use the docker-internal hostname:
 
 ```
 ✓ http://artifactory2:8082/artifactory/my-fed-repo
   ↑                       ↑
-  AF2's container hostname on the docker bridge net
-                          container port 8082 (router) — fixed,
-                          not the host-side port
+  art2's docker hostname   container port 8082 (router) — fixed,
+  on the bridge net        NOT the host-side port (8181/8182)
 ```
 
-Same in reverse: art2 → art1 federation members use
-`http://artifactory1:8082/artifactory/...`
+Same in reverse from art2 → art1 uses `http://artifactory1:8082/...`.
 
-This is *only* true for the federation member URL field. Your browser
-keeps using `http://localhost:8082/ui/` etc — that's host-side, fine.
+This is **only** the federation-member URL. Your browser keeps using
+`http://localhost:8082/ui/` etc — that's host-side and works fine.
 
-## What configure-cot.sh creates for you
+## Easy mode: `./arti-deployer fed-repos`
 
-| Repo key | Package type | Members |
-|---|---|---|
-| `generic-fed` | Generic | `http://artifactory1:8082/artifactory/generic-fed`, `http://artifactory2:8082/artifactory/generic-fed` |
-| `docker-fed`  | Docker  | `http://artifactory1:8082/artifactory/docker-fed`, `http://artifactory2:8082/artifactory/docker-fed` |
+To skip manually entering URLs every time, pre-create one federated
+repo per common package type:
 
-Upload a file to art1's `generic-fed` — it should mirror to art2 within
-seconds (visible at `http://localhost:8181/ui/repos/tree/General/generic-fed`).
+```bash
+./arti-deployer fed-repos
+```
 
-## Verify in UI
+Creates these on art1 (auto-propagates to art2 via federation):
 
-| Check | Where |
+| Repo key | Package type |
 |---|---|
-| Trust established | art1 → Administration → User Management → **Trusted Keys** |
-| JPD bound | art1 → Administration → User Management → **Access Federation** |
-| Federated repos | art1 → Administration → Repositories → `generic-fed` / `docker-fed` → Members |
+| `generic-fed` | generic |
+| `docker-fed`  | docker  |
+| `maven-fed`   | maven   |
+| `npm-fed`     | npm     |
+| `pypi-fed`    | pypi    |
+| `helm-fed`    | helm    |
+| `nuget-fed`   | nuget   |
+| `gradle-fed`  | gradle  |
+| `composer-fed`| composer|
+| `go-fed`      | go      |
 
-## Internal vs external URLs (the rule)
+Each has members `http://artifactory{1,2}:8082/artifactory/<key>`
+already wired. Push to art1 → it replicates to art2 in ~30s.
 
-| What | Uses | Why |
-|---|---|---|
-| Your browser URL | host: `localhost:8082` | Your laptop reaches AF via the published host ports |
-| Federation member URL | docker: `artifactory2:8082` | AF reaches AF over the docker bridge net |
-| Custom Base URL | docker: `artifactory{1,2}:8082/artifactory` | Other AFs need to reach this one — docker bridge again |
-| AF1's `jfrogUrl` (if set) | docker: `artifactory1:8082` | Internal use only |
+```bash
+./arti-deployer fed-repos list      # show which are present
+./arti-deployer fed-repos --delete  # remove them all
+```
 
-If you ever need cross-instance traffic to flow through your host (rare),
-publish AF2 on the same network namespace as AF1 — but that's beyond what
-this lab targets.
+To add another package type, append it to the `REPO_TYPES=(…)` array in
+`scripts/fed-repos.sh`.
+
+### Docker push example
+
+```bash
+docker pull hello-world
+docker tag hello-world localhost:8082/docker-fed/hello-world:latest
+docker login localhost:8082 -u admin -p password
+docker push localhost:8082/docker-fed/hello-world:latest
+
+# Wait ~30s, then verify on art2
+docker pull localhost:8182/docker-fed/hello-world:latest
+```
+
+If `docker login`/`push` complains about HTTP / insecure registry, add
+`localhost:8082` and `localhost:8182` to Docker Desktop's
+**Insecure Registries** list (Settings → Docker Engine → JSON), or
+push via NGINX HTTPS (`https://localhost:8443/docker-fed/…`) after
+trusting the self-signed cert.
+
+## What's NOT implemented — JPD UI visibility
+
+The Administration → Topology → JPD Services page will only show the
+local JPD (HOME). Adding the peer as a registered JPD requires either:
+
+- The standalone **JFrog Mission Control** product (separate
+  `jfrog/mission-control:*` deployment) — its API can complete the
+  JPD-pairing token handshake.
+- Or manual UI workflow with a pairing token — not currently exposed
+  by AF Pro's embedded `mc` microservice.
+
+I tried direct DB inserts into `mc_jpd` + `mc_service` +
+`mc_service_node` — the JPDs appear in the API but the UI renders
+**blank** because the JS bundle expects coherent data across
+`mc_jpd_edge_status` + `mc_jpd_license` (whose `custom_data` is a
+serialized binary blob). The hack is in git history at commit
+`63bc9dd` (reverted in `c057868`) if a future contributor wants to
+take another crack at it.
+
+**Bottom line:** federation works (push to one, read from the other).
+The Topology UI just doesn't show the peer JPD as a card. The
+federated-repo "Add Members → Deployments" dropdown also says "Remote
+JPDs not found" — use the **URL** tab instead with the docker hostname.
 
 ## Manual re-run
 
 ```bash
 rm .arti-deployer/.cot-configured
 ./arti-deployer down
-./arti-deployer up      # or: bash scripts/configure-cot.sh
+./arti-deployer up      # configure-cot.sh runs again
 ```
 
-## When the auto-bootstrap returns warnings
+## What this lab can't (yet) test
 
-`configure-cot.sh` does best-effort across AF versions — the Access API
-shape has shifted. If something logs a `⚠`, the script will tell you which
-step. Most failures resolve to one of:
-
-- **Pair endpoint 404 / 405** — AF version doesn't expose
-  `/access/api/v1/system/jpd/pair`. The script auto-falls-back to the
-  older topology endpoint. If that also fails, configure manually:
-  Admin → User Management → Access Federation → **Add JPD**, paste a
-  pairing token generated on the other instance.
-- **trusted_keys 409** — already trusted from a prior run. Harmless.
-- **Repo create 400** — likely a base URL issue. Re-run after a minute
-  (CoT propagation can take 30-60s on first bind), or check that step 2
-  set the base URL correctly.
-
-## What this can't (yet) test
-
-- Replication (push/pull) between independent AFs — different from federation
+- Replication (push/pull) between independent AFs — different from
+  federation
 - Edge-node topology
 - HA (multi-node sharing one DB + filestore)
 
-These are good "v2" additions. See [docs/extending.md](extending.md).
+These are good v2 additions. See [docs/extending.md](extending.md).

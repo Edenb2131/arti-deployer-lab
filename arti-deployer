@@ -15,6 +15,11 @@
 #   ./arti-deployer cleanup [--all] full wipe: containers/volumes/networks/
 #                                   rendered configs/state. --all also wipes
 #                                   .env and .licenses/ (fresh-clone state).
+#   ./arti-deployer fed-repos       create one federated repo per common
+#                                   package type (generic/docker/maven/npm/
+#                                   pypi/helm/nuget/gradle/composer/go).
+#                                   `--delete` to remove them. `list` to
+#                                   check which exist.
 #   ./arti-deployer status          show running services
 #   ./arti-deployer logs [service]  tail logs
 
@@ -184,6 +189,13 @@ cmd_cleanup() {
   "${SCRIPTS_DIR}/cleanup.sh" "$@"
 }
 
+# ─── fed-repos ───────────────────────────────────────────────────────────────
+cmd_fed_repos() {
+  check_deps
+  load_env
+  "${SCRIPTS_DIR}/fed-repos.sh" "$@"
+}
+
 # ─── parse_up_flags ──────────────────────────────────────────────────────────
 # Returns 0 if any flag was passed (non-interactive), 1 if no flags (wizard).
 # Sets INSTANCE_COUNT / USE_* globals.
@@ -329,13 +341,14 @@ cmd_logs() {
 }
 
 case "${cmd}" in
-  init)    cmd_init ;;
-  up)      shift || true; cmd_up "$@" ;;
-  down)    cmd_down ;;
-  reset)   cmd_reset ;;
-  cleanup) shift || true; cmd_cleanup "$@" ;;
-  status)  cmd_status ;;
-  logs)    shift || true; cmd_logs "${1:-}" ;;
+  init)      cmd_init ;;
+  up)        shift || true; cmd_up "$@" ;;
+  down)      cmd_down ;;
+  reset)     cmd_reset ;;
+  cleanup)   shift || true; cmd_cleanup "$@" ;;
+  fed-repos) shift || true; cmd_fed_repos "$@" ;;
+  status)    cmd_status ;;
+  logs)      shift || true; cmd_logs "${1:-}" ;;
   -h|--help|help)
     sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'
     ;;
