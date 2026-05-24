@@ -33,16 +33,24 @@ services:
         hard: 40000
     environment:
       EXTRA_JAVA_OPTIONS: "-Xms1g -Xmx4g"
+      # Database config via env vars (JFrog's recommended pattern for
+      # containerized deployments). A custom system.yaml at the wrong path
+      # silently breaks the router service in 7.111 — env vars take effect
+      # cleanly and match the official compose example.
+      JF_SHARED_DATABASE_TYPE: postgresql
+      JF_SHARED_DATABASE_DRIVER: org.postgresql.Driver
+      JF_SHARED_DATABASE_URL: jdbc:postgresql://postgres-art1:5432/artifactory
+      JF_SHARED_DATABASE_USERNAME: artifactory
+      JF_SHARED_DATABASE_PASSWORD: ${PG_AF1_PASSWORD}
+      JF_SHARED_NODE_ID: art1
+      JF_SHARED_NODE_NAME: art1
     ports:
       - "${AF1_HTTP_PORT}:8081"
       - "${AF1_ROUTER_PORT}:8082"
     volumes:
       - artifactory1-data:/var/opt/jfrog/artifactory
-      - ../config/art1/system.yaml:/var/opt/jfrog/artifactory/etc/system.yaml:ro
       # Drop license in /artifactory_extra_conf/ — AF copies it into the
-      # right place during first-boot bootstrap. Binding directly into
-      # /var/opt/jfrog/artifactory/etc/artifactory/ races AF's volume init
-      # and leaves the container stuck in Created state.
+      # right place during first-boot bootstrap.
       - ../config/art1/artifactory.lic:/artifactory_extra_conf/artifactory.lic:ro
     networks:
       arti-net:
