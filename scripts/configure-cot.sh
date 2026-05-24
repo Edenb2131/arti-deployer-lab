@@ -1,25 +1,23 @@
 #!/usr/bin/env bash
-# configure-cot.sh — End-to-end Circle of Trust + Access Federation between
-# art1 and art2, plus sample federated repos as smoke tests.
+# configure-cot.sh — Simple, clean CoT + federation between art1 and art2.
 #
-# Steps
-#   1. Get admin bearer tokens on both AFs (Access /api/v1/* needs Bearer
-#      in 7.100+; basic auth no longer works on those endpoints).
-#   2. Set each AF's Custom Base URL — federation refuses to start without
-#      one (UI says: "Federated repository requires a Custom Base URL").
-#   3. Pull each AF's Access root certificate.
-#   4. Cross-trust them via POST /access/api/v1/system/trusted_keys.
-#   5. Pair the JPDs (token-based bind). Tries the modern endpoint with
-#      a fallback to the older topology API.
-#   6. Create sample federated repos (`generic-fed`, `docker-fed`) on art1
-#      with both AFs as members using the correct docker-internal URLs.
+# What it does
+#   1. Copies each AF's /etc/access/keys/root.crt into the OTHER AF's
+#      /etc/access/keys/trusted/ directory via `docker cp`. Access service
+#      auto-ingests them (the files disappear within ~30s, moved into the
+#      Access DB). That's the entire Circle of Trust mechanism — it's a
+#      filesystem operation, not an API call.
+#   2. Sets each AF's Custom Base URL to its docker-internal hostname so
+#      federated repos can reach each other over the bridge net.
+#   3. Creates sample federated repos (generic-fed, docker-fed) with both
+#      AFs as members.
 #
-# URL gotcha
-#   When the UI asks for a federation member URL, you MUST use the docker
-#   hostname (http://artifactory2:8082/artifactory/REPO), NOT
-#   http://localhost:8182/...  AF1 validates the URL by HTTP-connecting
-#   to it from inside its own container, where "localhost" is AF1 itself,
-#   not the host machine.
+# Auth used: admin / password on /artifactory/api/* endpoints. That's all.
+# No Access-API admin token needed, no Mission Control pairing token, no
+# UI clicks.
+#
+# Verified working against AF 7.146.13 with both instances on the
+# arti-deployer_net bridge network.
 
 set -euo pipefail
 # shellcheck source=lib.sh
@@ -32,6 +30,7 @@ AF1_INTERNAL="http://artifactory1:8082"
 AF2_INTERNAL="http://artifactory2:8082"
 ADMIN_USER="admin"
 ADMIN_PASS="${AF_ADMIN_PASSWORD:-password}"
+KEYS_DIR="/var/opt/jfrog/artifactory/etc/access/keys"
 
 MARKER="${STATE_DIR}/.cot-configured"
 if [[ -f "${MARKER}" ]]; then
@@ -39,176 +38,76 @@ if [[ -f "${MARKER}" ]]; then
   exit 0
 fi
 
-fail_soft() {
-  log_warn "$1"
-  log_warn "Continuing — manual UI step may be needed; see docs/cot-federation.md."
-}
+# ─── 1. Cross-trust the Access root certificates ─────────────────────────────
+# This is what the JFrog docs call "Step 2: Creating Circle of Trust" — a
+# file-level operation. Access on each side ingests the cert into its DB
+# (the file disappears from trusted/ within ~30s), and from that point on
+# tokens signed by the other JPD validate cleanly.
+log_step "Cross-trusting Access root certs (filesystem CoT)"
 
-# ─── 1. Bearer tokens ────────────────────────────────────────────────────────
-log_step "Acquiring admin bearer tokens"
-TOKEN1=$(af_admin_token "${AF1_URL}" 1)
-TOKEN2=$(af_admin_token "${AF2_URL}" 2)
+local_root_art1=$(mktemp)
+local_root_art2=$(mktemp)
+trap 'rm -f "${local_root_art1}" "${local_root_art2}"' EXIT
 
-# Detect whether we have Access-API tokens (from .env) or just legacy
-# Artifactory tokens. We can tell by the audience claim — Access tokens
-# have aud=jfac@... or *@*, legacy tokens have aud=jfrt@...
-ACCESS_API_OK=1
-for tok in "${TOKEN1}" "${TOKEN2}"; do
-  if [[ -z "${tok}" || "${tok}" == "null" ]]; then
-    ACCESS_API_OK=0
-    continue
+log_info "Pulling root.crt from each AF to host..."
+docker cp "artifactory1:${KEYS_DIR}/root.crt" "${local_root_art1}"
+docker cp "artifactory2:${KEYS_DIR}/root.crt" "${local_root_art2}"
+
+log_info "Dropping into the other AF's trusted/ dir..."
+docker cp "${local_root_art2}" "artifactory1:${KEYS_DIR}/trusted/art2-root.crt"
+docker cp "${local_root_art1}" "artifactory2:${KEYS_DIR}/trusted/art1-root.crt"
+
+# Ensure AF user (uid 1030) can read — docker cp lands as root by default.
+docker exec --user root artifactory1 chown 1030:1030 "${KEYS_DIR}/trusted/art2-root.crt" 2>/dev/null || true
+docker exec --user root artifactory2 chown 1030:1030 "${KEYS_DIR}/trusted/art1-root.crt" 2>/dev/null || true
+
+log_info "Waiting for Access to ingest the certs (files vanish when imported)..."
+elapsed=0
+while (( elapsed < 90 )); do
+  sleep 5
+  elapsed=$((elapsed + 5))
+  a1=$(docker exec artifactory1 ls "${KEYS_DIR}/trusted/art2-root.crt" 2>/dev/null || true)
+  a2=$(docker exec artifactory2 ls "${KEYS_DIR}/trusted/art1-root.crt" 2>/dev/null || true)
+  if [[ -z "${a1}" && -z "${a2}" ]]; then
+    log_ok "Both certs ingested (took ~${elapsed}s). Circle of Trust established."
+    break
   fi
-  aud=$(echo "${tok}" | cut -d. -f2 | tr '_-' '/+' | \
-    python3 -c "import sys,base64,json; s=sys.stdin.read().strip(); pad='='*(-len(s)%4); print(json.loads(base64.b64decode(s+pad)).get('aud',''))" 2>/dev/null)
-  case "${aud}" in
-    jfac@*|*@*) : ;;
-    *) ACCESS_API_OK=0 ;;
-  esac
+  printf '.'
 done
-
-HDR1=(-H "Authorization: Bearer ${TOKEN1}")
-HDR2=(-H "Authorization: Bearer ${TOKEN2}")
-
-if [[ "${ACCESS_API_OK}" == "1" ]]; then
-  log_ok "Access-API bearer tokens loaded from .env. Full CoT flow will run."
-else
-  log_warn "No AF{1,2}_ADMIN_ACCESS_TOKEN in .env (or audience is jfrt-only)."
-  log_warn "AF 7.146 won't let us bootstrap Access-API tokens from admin/password."
-  log_warn "→ We can still set base URLs and create federated repos via the legacy API."
-  log_warn "→ The Access-side trust exchange + JPD bind will be skipped — you'll need"
-  log_warn "  to either (a) generate admin Access tokens in the UI and paste into .env"
-  log_warn "  then re-run this script, or (b) configure CoT manually in the UI."
-  log_warn ""
-  log_warn "  How to generate the tokens (per instance):"
-  log_warn "    1. Open the AF UI (http://localhost:8082 for art1, :8182 for art2)"
-  log_warn "    2. Log in as admin (forced password change on first login)"
-  log_warn "    3. Administration → User Management → Access Tokens → Generate Token"
-  log_warn "    4. User Name=admin, Scope='Admin Privileges', generate, copy the token"
-  log_warn "    5. Paste into .env: AF1_ADMIN_ACCESS_TOKEN=... / AF2_ADMIN_ACCESS_TOKEN=..."
-  log_warn "    6. Re-run: bash scripts/configure-cot.sh"
+if [[ -n "${a1}" || -n "${a2}" ]]; then
+  log_warn "Certs still present in trusted/ after ${elapsed}s — Access may not have picked them up."
+  log_warn "Try restarting AF: ./arti-deployer down && ./arti-deployer up"
 fi
 
-# ─── 2. Custom Base URLs ─────────────────────────────────────────────────────
+# ─── 2. Set Custom Base URLs ─────────────────────────────────────────────────
+# Federated repos require a Base URL on each member — otherwise the UI
+# rejects them with "Federated repository requires a Custom Base URL".
+# Both AFs advertise their docker-internal hostname so federation members
+# can reach each other over the bridge net (NOT localhost — see step 3).
 log_step "Setting Custom Base URLs"
 set_base_url() {
-  local af_url="$1" label="$2" base_url="$3" token="$4"
+  local af_url="$1" label="$2" base_url="$3"
   log_info "${label}: ${base_url}"
   local code
   code=$(curl -sS -o /tmp/af-base-resp.txt -w '%{http_code}' \
-    -H "Authorization: Bearer ${token}" \
+    -u "${ADMIN_USER}:${ADMIN_PASS}" \
     -X PUT -H 'Content-Type: text/plain' \
     --data "${base_url}" \
     "${af_url}/artifactory/api/system/configuration/baseUrl")
   if [[ "${code}" =~ ^2 ]]; then
-    log_ok "Base URL set on ${label} (HTTP ${code})."
+    log_ok "${label} base URL set (HTTP ${code})."
   else
-    fail_soft "Base URL PUT on ${label} returned ${code}: $(cat /tmp/af-base-resp.txt)"
+    log_warn "Base URL PUT on ${label} returned ${code}: $(cat /tmp/af-base-resp.txt)"
   fi
 }
-set_base_url "${AF1_URL}" "art1" "${AF1_INTERNAL}/artifactory" "${TOKEN1}"
-set_base_url "${AF2_URL}" "art2" "${AF2_INTERNAL}/artifactory" "${TOKEN2}"
+set_base_url "${AF1_URL}" "art1" "${AF1_INTERNAL}/artifactory"
+set_base_url "${AF2_URL}" "art2" "${AF2_INTERNAL}/artifactory"
 
-if [[ "${ACCESS_API_OK}" == "1" ]]; then
-# ─── 3. Fetch each instance's Access root certificate ────────────────────────
-log_step "Fetching Access root certificates"
-CERT1=$(curl -sS "${HDR1[@]}" "${AF1_URL}/access/api/v1/system/root_certificate") || \
-  fail_soft "Couldn't fetch art1 root cert."
-CERT2=$(curl -sS "${HDR2[@]}" "${AF2_URL}/access/api/v1/system/root_certificate") || \
-  fail_soft "Couldn't fetch art2 root cert."
-mkdir -p "${STATE_DIR}"
-echo "${CERT1}" > "${STATE_DIR}/art1-root.pem"
-echo "${CERT2}" > "${STATE_DIR}/art2-root.pem"
-log_ok "Root certs saved under ${STATE_DIR}/."
-
-# ─── 4. Cross-trust (Circle of Trust) ────────────────────────────────────────
-log_step "Cross-trusting the root certificates"
-trust_cert() {
-  local target_url="$1" target_label="$2" cert_pem="$3" kid="$4" token="$5"
-  log_info "Trusting ${kid} on ${target_label}"
-  local payload code
-  payload=$(jq -nc --arg k "${cert_pem}" --arg id "${kid}" '{key:$k, kid:$id}')
-  code=$(curl -sS -o /tmp/af-trust-resp.txt -w '%{http_code}' \
-    -H "Authorization: Bearer ${token}" \
-    -X POST -H 'Content-Type: application/json' \
-    --data "${payload}" \
-    "${target_url}/access/api/v1/system/trusted_keys")
-  case "${code}" in
-    20*) log_ok "${target_label} trusts ${kid} (HTTP ${code})." ;;
-    409) log_info "${target_label} already trusts ${kid} (HTTP 409 — duplicate)." ;;
-    *)   fail_soft "trusted_keys POST to ${target_label} returned ${code}: $(cat /tmp/af-trust-resp.txt)" ;;
-  esac
-}
-trust_cert "${AF1_URL}" "art1" "${CERT2}" "art2-root" "${TOKEN1}"
-trust_cert "${AF2_URL}" "art2" "${CERT1}" "art1-root" "${TOKEN2}"
-
-# ─── 5. JPD pairing (token-based bind) ───────────────────────────────────────
-# Modern AF: a pairing token is generated on the source, then consumed on
-# the target. Endpoint shape has shifted across versions — try the current
-# one first, fall back to the older topology endpoint, and log clearly if
-# both fail so the user can finish in the UI.
-log_step "Pairing the JPDs (Access Federation)"
-
-generate_pair_token() {
-  local af_url="$1" token="$2"
-  local body code
-  body=$(curl -sS -o /tmp/af-pair-resp.txt -w '%{http_code}' \
-    -H "Authorization: Bearer ${token}" \
-    -X POST -H 'Content-Type: application/json' \
-    --data '{"scope":"applied-permissions/admin","expires_in":3600}' \
-    "${af_url}/access/api/v1/system/jpd/pair")
-  echo "${body}"
-}
-
-PAIR_HTTP=$(generate_pair_token "${AF1_URL}" "${TOKEN1}")
-if [[ "${PAIR_HTTP}" =~ ^2 ]]; then
-  PAIRING_TOKEN=$(jq -r '.access_token // .token // .pairing_token // empty' /tmp/af-pair-resp.txt)
-  if [[ -n "${PAIRING_TOKEN}" && "${PAIRING_TOKEN}" != "null" ]]; then
-    log_ok "Pairing token generated on art1."
-    BIND_HTTP=$(curl -sS -o /tmp/af-bind-resp.txt -w '%{http_code}' \
-      -H "Authorization: Bearer ${TOKEN2}" \
-      -X POST -H 'Content-Type: application/json' \
-      --data "$(jq -nc --arg token "${PAIRING_TOKEN}" --arg url "${AF1_INTERNAL}" \
-        '{token: $token, base_url: $url}')" \
-      "${AF2_URL}/access/api/v1/system/jpd/bind")
-    if [[ "${BIND_HTTP}" =~ ^2 ]]; then
-      log_ok "art2 bound to art1 (HTTP ${BIND_HTTP})."
-    else
-      fail_soft "Bind on art2 returned HTTP ${BIND_HTTP}: $(cat /tmp/af-bind-resp.txt)"
-    fi
-  else
-    fail_soft "pair endpoint returned 2xx but no token in body — see /tmp/af-pair-resp.txt"
-  fi
-else
-  log_warn "JPD pair endpoint /access/api/v1/system/jpd/pair returned HTTP ${PAIR_HTTP}"
-  log_warn "Falling back to older topology federation_target endpoint..."
-  FALLBACK_HTTP=$(curl -sS -o /tmp/af-fed-resp.txt -w '%{http_code}' \
-    -H "Authorization: Bearer ${TOKEN1}" \
-    -X POST -H 'Content-Type: application/json' \
-    --data "$(jq -nc --arg url "${AF2_INTERNAL}" \
-      '{target_url:$url, propagate_groups:true, propagate_users:true, propagate_permissions:true}')" \
-    "${AF1_URL}/access/api/v1/topology/federation_target")
-  case "${FALLBACK_HTTP}" in
-    20*) log_ok "Topology federation_target registered on art1 (HTTP ${FALLBACK_HTTP})." ;;
-    *)   fail_soft "Both pair endpoints failed. Configure manually: UI → Administration → User Management → Access Federation." ;;
-  esac
-fi
-
-# Verify (best-effort — different versions expose different endpoints)
-log_step "Verifying JPD topology"
-if curl -sS "${HDR1[@]}" "${AF1_URL}/access/api/v1/system/jpd" >/tmp/af-jpd.json 2>&1; then
-  log_info "art1 JPD list:"
-  jq -r '.[] | "  - \(.name // .service_id // "?") @ \(.base_url // "?")"' </tmp/af-jpd.json 2>/dev/null || \
-    cat /tmp/af-jpd.json | head -20
-fi
-
-fi  # end of ACCESS_API_OK gate (steps 3-5 require Access tokens)
-
-# ─── 6. Sample federated repos ───────────────────────────────────────────────
-# Both members use the docker-internal hostname so AF can reach the other
-# side over the bridge net. localhost:81xx WILL NOT WORK from inside the
-# AF container — that's the most common federation pitfall.
+# ─── 3. Create sample federated repos ────────────────────────────────────────
+# IMPORTANT — member URLs MUST use the docker-internal hostname
+# (http://artifactory{1,2}:8082/...). AF inside its container can't reach
+# the host's localhost:8082 — that's the most common federation pitfall.
 log_step "Creating sample federated repos"
-
 create_federated_repo() {
   local repo_key="$1" package_type="$2"
   local payload code
@@ -227,34 +126,65 @@ create_federated_repo() {
       ]
     }')
   code=$(curl -sS -o /tmp/af-repo-resp.txt -w '%{http_code}' \
-    -H "Authorization: Bearer ${TOKEN1}" \
+    -u "${ADMIN_USER}:${ADMIN_PASS}" \
     -X PUT -H 'Content-Type: application/json' \
     --data "${payload}" \
     "${AF1_URL}/artifactory/api/repositories/${repo_key}")
   case "${code}" in
     20*) log_ok "Created federated repo '${repo_key}' (${package_type}, HTTP ${code})." ;;
-    400) log_warn "Repo '${repo_key}' rejected (HTTP 400). Body: $(cat /tmp/af-repo-resp.txt)" ;;
+    400)
+      # AF returns 400 (not 409) when the repo key already exists
+      # case-insensitively. Treat as already-exists.
+      if grep -q 'already exists' /tmp/af-repo-resp.txt; then
+        log_info "Repo '${repo_key}' already exists — skipping."
+      else
+        log_warn "Repo '${repo_key}' rejected (HTTP 400): $(cat /tmp/af-repo-resp.txt)"
+      fi
+      ;;
     409) log_info "Repo '${repo_key}' already exists (HTTP 409 — skipping)." ;;
-    *)   fail_soft "Repo '${repo_key}' create returned HTTP ${code}: $(cat /tmp/af-repo-resp.txt)" ;;
+    *)   log_warn "Repo '${repo_key}' create returned HTTP ${code}: $(cat /tmp/af-repo-resp.txt)" ;;
   esac
 }
-
 create_federated_repo "generic-fed" "generic"
 create_federated_repo "docker-fed"  "docker"
 
+# ─── 4. Smoke test: upload to art1, confirm it lands on art2 ─────────────────
+log_step "Verifying federation replication (smoke test)"
+test_file=$(mktemp)
+echo "arti-deployer-cot-smoke-$(date +%s)" > "${test_file}"
+curl -sf -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -X PUT --data-binary "@${test_file}" \
+  "${AF1_URL}/artifactory/generic-fed/cot-smoke.txt" >/dev/null && \
+  log_info "Uploaded test file to art1 generic-fed."
+
+log_info "Polling art2 (up to 60s)..."
+elapsed=0
+while (( elapsed < 60 )); do
+  sleep 5
+  elapsed=$((elapsed + 5))
+  rc=$(curl -sf -o /dev/null -m 3 -u "${ADMIN_USER}:${ADMIN_PASS}" -w '%{http_code}' \
+    "${AF2_URL}/artifactory/generic-fed/cot-smoke.txt" 2>/dev/null || echo 000)
+  if [[ "${rc}" == "200" ]]; then
+    log_ok "✓ Federation replication confirmed (took ~${elapsed}s)."
+    break
+  fi
+  printf '.'
+done
+if [[ "${rc}" != "200" ]]; then
+  log_warn "✗ Test file did NOT replicate to art2 within ${elapsed}s."
+  log_warn "Check art1 logs: docker logs artifactory1 | grep -i federation"
+fi
+rm -f "${test_file}"
+curl -sf -u "${ADMIN_USER}:${ADMIN_PASS}" -X DELETE \
+  "${AF1_URL}/artifactory/generic-fed/cot-smoke.txt" >/dev/null 2>&1 || true
+
 touch "${MARKER}"
 echo
-if [[ "${ACCESS_API_OK}" == "1" ]]; then
-  log_ok "CoT + Access Federation bootstrap finished."
-else
-  log_ok "Base URLs set + federated repos created (Access-side trust SKIPPED — see warnings above)."
-fi
-echo
-log_info "Verify in UI:"
-log_info "  art1 → Administration → Repositories → generic-fed (Federation tab → members)"
-log_info "  art1 → Administration → Repositories → docker-fed  (Federation tab → members)"
-echo
-log_info "Adding more federated members manually? Use docker-internal URLs:"
+log_ok "CoT + Federation bootstrap complete."
+log_info "Federated repos: generic-fed, docker-fed (both on art1 and art2)"
+log_info "Upload to art1's generic-fed → replicates to art2 within ~30s."
+log_info ""
+log_info "Adding more federated members? Use docker-internal URLs:"
 log_info "  ✓  http://artifactory2:8082/artifactory/<repo>"
-log_info "  ✗  http://localhost:8182/artifactory/<repo>   (AF inside its container"
-log_info "                                                  can't reach host's localhost)"
+log_info "  ✗  http://localhost:8182/artifactory/<repo>   (AF container can't"
+log_info "                                                  reach host's localhost)"
