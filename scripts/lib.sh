@@ -121,7 +121,6 @@ write_license() {
 #   USE_NGINX_HTTPS (0/1)
 #   USE_LDAP        (0/1)
 #   USE_KEYCLOAK    (0/1)
-#   USE_XRAY        (0/1)
 build_compose_chain() {
   local chain=()
   chain+=("-f" "${COMPOSE_DIR}/art1.yml")
@@ -134,7 +133,6 @@ build_compose_chain() {
   fi
   [[ "${USE_LDAP}" == "1"     ]] && chain+=("-f" "${COMPOSE_DIR}/ldap.yml")
   [[ "${USE_KEYCLOAK}" == "1" ]] && chain+=("-f" "${COMPOSE_DIR}/keycloak.yml")
-  [[ "${USE_XRAY}" == "1"     ]] && chain+=("-f" "${COMPOSE_DIR}/xray.yml")
   printf '%s\n' "${chain[@]}"
 }
 
@@ -147,7 +145,6 @@ USE_NGINX=${USE_NGINX}
 USE_NGINX_HTTPS=${USE_NGINX_HTTPS}
 USE_LDAP=${USE_LDAP}
 USE_KEYCLOAK=${USE_KEYCLOAK}
-USE_XRAY=${USE_XRAY}
 EOF
 }
 
@@ -158,7 +155,7 @@ load_selection() {
   else
     INSTANCE_COUNT=1
     USE_NGINX=0; USE_NGINX_HTTPS=0
-    USE_LDAP=0; USE_KEYCLOAK=0; USE_XRAY=0
+    USE_LDAP=0; USE_KEYCLOAK=0
   fi
 }
 
@@ -218,7 +215,6 @@ $([[ "${USE_NGINX}" == "1" ]] && printf "NGINX (HTTP):      http://localhost:%s/
 $([[ "${USE_NGINX_HTTPS}" == "1" ]] && printf "NGINX (HTTPS):     https://localhost:%s/  (self-signed)\n" "${NGINX_HTTPS_PORT}")
 $([[ "${USE_KEYCLOAK}" == "1" ]] && printf "Keycloak admin:    http://localhost:%s/  (admin / \$KEYCLOAK_ADMIN_PASSWORD)\n" "${KEYCLOAK_PORT}")
 $([[ "${USE_LDAP}" == "1" ]] && printf "LDAP:              ldap://localhost:%s  (cn=admin,dc=jfrog,dc=local / \$LDAP_ADMIN_PASSWORD)\n" "${LDAP_PORT}")
-$([[ "${USE_XRAY}" == "1" ]] && printf "Xray UI:           http://localhost:%s/\n" "${XRAY_PORT}")
 
 Default Artifactory admin: admin / password  (forced change on first login)
 EOF

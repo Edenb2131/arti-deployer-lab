@@ -20,8 +20,7 @@
                   ├── compose/art2.yml         → artifactory2 + postgres-art2
                   ├── compose/nginx.yml        OR  compose/nginx-https.yml
                   ├── compose/ldap.yml         → arti-openldap
-                  ├── compose/keycloak.yml     → arti-keycloak
-                  └── compose/xray.yml         → arti-xray + postgres-xray + rabbitmq-xray
+                  └── compose/keycloak.yml     → arti-keycloak
                   │
                   ▼ post-up configurators (each behind a .arti-deployer/.*-configured marker)
                   ├── scripts/configure-cot.sh        (if instances == 2)

@@ -3,7 +3,7 @@
 #
 # What gets removed:
 #   - All compose-managed containers (artifactory, postgres, nginx, ldap,
-#     keycloak, xray, rabbitmq services)
+#     keycloak services)
 #   - All named volumes (arti-deployer_*)
 #   - The shared docker network (arti-deployer_net)
 #   - Rendered configs (config/**/{system.yaml,realm.json,*.ldif})
@@ -46,9 +46,8 @@ declare -a CONTAINERS VOLUMES NETWORKS
 mapfile -t CONTAINERS < <(
   docker ps -aq --filter 'name=artifactory1' --filter 'name=artifactory2' \
                 --filter 'name=postgres-art1' --filter 'name=postgres-art2' \
-                --filter 'name=postgres-xray' --filter 'name=rabbitmq-xray' \
                 --filter 'name=arti-nginx' --filter 'name=arti-openldap' \
-                --filter 'name=arti-keycloak' --filter 'name=arti-xray' \
+                --filter 'name=arti-keycloak' \
     2>/dev/null
 )
 mapfile -t VOLUMES  < <(docker volume ls -q  --filter 'name=arti-deployer_' 2>/dev/null)
@@ -71,7 +70,6 @@ done
 declare -a FILE_PATTERNS=(
   "${CONFIG_DIR}/art1/system.yaml"
   "${CONFIG_DIR}/art2/system.yaml"
-  "${CONFIG_DIR}/xray/system.yaml"
   "${CONFIG_DIR}/keycloak/realm.json"
   "${CONFIG_DIR}/ldap/ldifs/*.ldif"
   "${CONFIG_DIR}/nginx/certs/server.crt"

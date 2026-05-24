@@ -3,13 +3,11 @@
 .env.local
 *.lic
 artifactory.lic
-xray.lic
 .licenses/
 
 # Rendered configs (templates are committed as *.tmpl; outputs are local-only)
 config/art1/system.yaml
 config/art2/system.yaml
-config/xray/system.yaml
 config/keycloak/realm.json
 config/ldap/ldifs/*.ldif
 !config/ldap/ldifs/*.ldif.tmpl
@@ -37,4 +35,3 @@ logs/
 # Bootstrapped license files dropped into config dirs
 config/art1/artifactory.lic
 config/art2/artifactory.lic
-config/xray/xray.lic

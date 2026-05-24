@@ -27,12 +27,10 @@ JOIN_KEY_VAL=$(gen_hex32)
 MASTER_KEY_VAL=$(gen_hex32)
 PG_AF1_VAL=$(gen_passwd)
 PG_AF2_VAL=$(gen_passwd)
-PG_XRAY_VAL=$(gen_passwd)
 LDAP_ADMIN_VAL=$(gen_passwd)
 LDAP_USER_VAL=$(gen_passwd)
 KC_ADMIN_VAL=$(gen_passwd)
 KC_CLIENT_VAL=$(gen_passwd)
-RABBIT_PASS_VAL=$(gen_passwd)
 
 # ─── Build .env by copying .env.example and replacing empty values ───────────
 cp "${ENV_EXAMPLE}" "${ENV_FILE}"
@@ -51,12 +49,10 @@ set_var JOIN_KEY               "${JOIN_KEY_VAL}"
 set_var MASTER_KEY             "${MASTER_KEY_VAL}"
 set_var PG_AF1_PASSWORD        "${PG_AF1_VAL}"
 set_var PG_AF2_PASSWORD        "${PG_AF2_VAL}"
-set_var PG_XRAY_PASSWORD       "${PG_XRAY_VAL}"
 set_var LDAP_ADMIN_PASSWORD    "${LDAP_ADMIN_VAL}"
 set_var LDAP_USER_PASSWORD     "${LDAP_USER_VAL}"
 set_var KEYCLOAK_ADMIN_PASSWORD "${KC_ADMIN_VAL}"
 set_var KEYCLOAK_CLIENT_SECRET "${KC_CLIENT_VAL}"
-set_var XRAY_RABBITMQ_PASSWORD "${RABBIT_PASS_VAL}"
 
 chmod 600 "${ENV_FILE}"
 

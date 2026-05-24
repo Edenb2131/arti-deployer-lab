@@ -8,7 +8,7 @@
 #   ./arti-deployer up [flags]      non-interactive (skip wizard); flags:
 #                                     --instances {1|2}
 #                                     --nginx | --https   (--https implies --nginx)
-#                                     --ldap --keycloak --xray
+#                                     --ldap --keycloak
 #                                     --yes  (don't prompt for confirmation)
 #   ./arti-deployer down            stop everything (keeps volumes)
 #   ./arti-deployer reset           stop + wipe volumes (destructive)
@@ -129,7 +129,7 @@ wizard() {
 
   # 2. Configurations — separate yes/no per overlay (clearer than a multi-
   #    select where users sometimes press Enter without toggling first).
-  USE_NGINX=0; USE_LDAP=0; USE_KEYCLOAK=0; USE_NGINX_HTTPS=0; USE_XRAY=0
+  USE_NGINX=0; USE_LDAP=0; USE_KEYCLOAK=0; USE_NGINX_HTTPS=0
 
   if gum confirm "Add NGINX reverse proxy?"; then
     USE_NGINX=1
@@ -144,10 +144,6 @@ wizard() {
 
   if gum confirm "Add Keycloak (OIDC) provider?"; then
     USE_KEYCLOAK=1
-  fi
-
-  if gum confirm "Deploy Xray as well?"; then
-    USE_XRAY=1
   fi
 
   # 4. Artifactory version
@@ -168,8 +164,7 @@ wizard() {
   AF version:     ${AF_VERSION}
   NGINX:          $([[ "${USE_NGINX}" == "1" ]] && echo "yes ($([[ "${USE_NGINX_HTTPS}" == "1" ]] && echo "HTTPS" || echo "HTTP"))" || echo no)
   LDAP:           $([[ "${USE_LDAP}" == "1" ]] && echo yes || echo no)
-  Keycloak:       $([[ "${USE_KEYCLOAK}" == "1" ]] && echo yes || echo no)
-  Xray:           $([[ "${USE_XRAY}" == "1" ]] && echo yes || echo no)"
+  Keycloak:       $([[ "${USE_KEYCLOAK}" == "1" ]] && echo yes || echo no)"
   echo
 
   gum confirm "Proceed with this configuration?" || { log_warn "Cancelled."; exit 0; }
@@ -195,7 +190,7 @@ cmd_cleanup() {
 parse_up_flags() {
   INSTANCE_COUNT=1
   USE_NGINX=0; USE_NGINX_HTTPS=0
-  USE_LDAP=0; USE_KEYCLOAK=0; USE_XRAY=0
+  USE_LDAP=0; USE_KEYCLOAK=0
   local saw_flag=0
   local skip_confirm=0
   while [[ $# -gt 0 ]]; do
@@ -205,7 +200,6 @@ parse_up_flags() {
       --https)     USE_NGINX=1; USE_NGINX_HTTPS=1;       saw_flag=1; shift ;;
       --ldap)      USE_LDAP=1;                           saw_flag=1; shift ;;
       --keycloak)  USE_KEYCLOAK=1;                       saw_flag=1; shift ;;
-      --xray)      USE_XRAY=1;                           saw_flag=1; shift ;;
       --yes|-y)    skip_confirm=1;                       saw_flag=1; shift ;;
       *) log_err "Unknown flag: $1"; exit 1 ;;
     esac
@@ -225,7 +219,7 @@ cmd_up() {
 
   parse_up_flags "$@"
   if [[ "${NON_INTERACTIVE}" == "1" ]]; then
-    log_step "Non-interactive: instances=${INSTANCE_COUNT} nginx=${USE_NGINX} https=${USE_NGINX_HTTPS} ldap=${USE_LDAP} keycloak=${USE_KEYCLOAK} xray=${USE_XRAY}"
+    log_step "Non-interactive: instances=${INSTANCE_COUNT} nginx=${USE_NGINX} https=${USE_NGINX_HTTPS} ldap=${USE_LDAP} keycloak=${USE_KEYCLOAK}"
     save_selection
   else
     wizard
