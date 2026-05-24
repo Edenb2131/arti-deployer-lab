@@ -6,13 +6,11 @@ shared:
   node:
     id: art2
     name: art2
-    ip: artifactory2
   database:
     type: postgresql
     driver: org.postgresql.Driver
     url: jdbc:postgresql://postgres-art2:5432/artifactory
     username: artifactory
     password: ${PG_AF2_PASSWORD}
-  security:
-    joinKey: ${JOIN_KEY}
-    masterKey: ${MASTER_KEY}
+# Security keys omitted — see config/art1/system.yaml.tmpl note. The CoT
+# bootstrap (scripts/configure-cot.sh) handles cross-instance trust.

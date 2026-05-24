@@ -10,13 +10,15 @@ shared:
   node:
     id: art1
     name: art1
-    ip: artifactory1
   database:
     type: postgresql
     driver: org.postgresql.Driver
     url: jdbc:postgresql://postgres-art1:5432/artifactory
     username: artifactory
     password: ${PG_AF1_PASSWORD}
-  security:
-    joinKey: ${JOIN_KEY}
-    masterKey: ${MASTER_KEY}
+# Security keys (joinKey/masterKey) deliberately omitted — AF auto-generates
+# them on first boot when not provided here. They live in:
+#   /var/opt/jfrog/artifactory/var/etc/security/master.key
+#   /var/opt/jfrog/artifactory/var/etc/security/join.key
+# For dual-instance topology, copy these between art1 and art2 BEFORE
+# starting art2 (configure-cot.sh handles that separately).
