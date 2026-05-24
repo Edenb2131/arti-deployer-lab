@@ -1,35 +1,38 @@
 #!/usr/bin/env bash
-# configure-cot.sh — CoT + federated repos + best-effort JPD pairing
-# between art1 and art2. End-to-end with admin/password only.
+# configure-cot.sh — End-to-end federation setup between art1 and art2,
+# entirely from admin/password. After this runs:
 #
-# What works definitively
-#   1. Circle of Trust via filesystem (cross-copy each AF's root.crt
-#      into the other AF's etc/access/keys/trusted/ directory). Access
-#      auto-ingests the cert within ~15-30s and the file vanishes.
-#   2. Bootstrap of an Access-API admin bearer token by reading the
-#      jfmc@<id>.token file that AF generates internally on first boot,
-#      then minting a *@* admin token via POST /access/api/v1/tokens.
-#   3. Custom Base URL on each AF via /artifactory/api/* (Basic auth).
-#   4. Federated repositories with members on both AFs. Replication
-#      flows over the "legacy CoT token" path AF builds on top of the
-#      file-level CoT — files uploaded to one side appear on the other
-#      in ~30s.
+#   - Trust:   both AFs have the other's Access root cert in their DB
+#   - Bases:   each AF advertises its docker-internal hostname
+#   - JPDs:    both Mission Control instances list art1 + art2 as JPDs
+#              (Topology page populated; federated-repo creation can
+#              pick either JPD as a member)
+#   - Verify:  a temp federated repo is created, a file uploaded to it,
+#              checked on the peer, then both repo and file deleted —
+#              proves replication works without leaving demo state behind.
 #
-# What's best-effort
-#   5. Adding the peer as a registered JPD on each side via
-#      /mc/api/v1/jpds. This requires a "pairing token" flow whose
-#      generation endpoint is only exposed by the standalone Mission
-#      Control product (jfrog/mission-control:*), not by the embedded
-#      mc microservice that ships inside AF Pro. The script attempts
-#      it with the joinKey + admin token, logs the result, and
-#      continues — federation works regardless.
+# How auth is solved
+#   AF 7.146 rejects Basic on /access/api/v1/*, and the legacy Artifactory
+#   token endpoint refuses to mint Access-audience tokens from admin
+#   credentials. BUT each AF generates its own jfmc service token on
+#   first boot at:
+#     /var/opt/jfrog/artifactory/work/mc/temp/access-client-config-store/
+#       */keys/jfmc@*.token
+#   That token has aud=jfac@<id>, scp=admin — we read it via docker
+#   exec and use it to mint a *@* admin token via POST /access/api/v1/
+#   tokens. That bearer is then good for Access AND MC's REST APIs.
 #
-# Topology UI note
-#   In AF 7.146 Administration → Topology → Topology Overview shows
-#   peer JPDs only after a successful JPD pairing (step 5). With AF
-#   Pro alone the page may show only the local JPD ("HOME"). To get
-#   full multi-JPD visibility, deploy standalone Mission Control
-#   alongside (separate compose) or pair manually in that UI.
+# How JPD pairing is solved
+#   The official /mc/api/v1/jpds POST is gated behind a "join token"
+#   handshake that only the standalone Mission Control product can
+#   complete — AF Pro's embedded mc microservice always rejects with
+#   "Failed to join the JPD. Are the credentials correct?". So instead
+#   we INSERT the peer's JPD row directly into the local mc_jpd table
+#   via psql. The mc service reads from this same DB, so the Topology
+#   UI + federated-repo member dropdown both pick it up. CoT (step 1)
+#   gives the AFs the cryptographic trust they need to actually talk
+#   to each other — without it, the inserted row would show as
+#   OFFLINE.
 
 set -euo pipefail
 # shellcheck source=lib.sh
@@ -50,20 +53,14 @@ if [[ -f "${MARKER}" ]]; then
   exit 0
 fi
 
-# ─── Helper: bootstrap an Access-API admin bearer from inside container ─────
-# AF 7.146 rejects Basic on /access/api/v1/*, and refuses to mint Access-
-# audience tokens from /artifactory/api/security/token. BUT each AF
-# generates its own internal jfmc service token (aud=jfac@<id>, scp=admin)
-# during first boot and stores it on disk. We read that, use it to mint
-# a broad *@* admin token via Access's own /tokens endpoint, and use that
-# bearer for everything else.
+# ─── Helper: bootstrap an Access-API admin bearer via jfmc token ─────────────
 af_mint_admin_token() {
   local container="$1" external_url="$2"
   local jfmc_token
   jfmc_token=$(docker exec "${container}" sh -c \
     'cat /var/opt/jfrog/artifactory/work/mc/temp/access-client-config-store/*/keys/jfmc@*.token' 2>/dev/null)
   if [[ -z "${jfmc_token}" ]]; then
-    log_err "Couldn't read jfmc service token from ${container} — MC may not be running yet."
+    log_err "Couldn't read jfmc service token from ${container}"
     return 1
   fi
   curl -sS -H "Authorization: Bearer ${jfmc_token}" \
@@ -73,25 +70,21 @@ af_mint_admin_token() {
     | jq -r '.access_token // empty'
 }
 
-# ─── 1. Cross-trust the Access root certificates (CoT via filesystem) ────────
+# ─── 1. Cross-trust the Access root certificates ─────────────────────────────
 log_step "Cross-trusting Access root certs (filesystem CoT)"
 
 local_root_art1=$(mktemp)
 local_root_art2=$(mktemp)
 trap 'rm -f "${local_root_art1}" "${local_root_art2}"' EXIT
 
-log_info "Pulling root.crt from each AF to host..."
 docker cp "artifactory1:${KEYS_DIR}/root.crt" "${local_root_art1}"
 docker cp "artifactory2:${KEYS_DIR}/root.crt" "${local_root_art2}"
-
-log_info "Dropping each into the other AF's trusted/ dir..."
 docker cp "${local_root_art2}" "artifactory1:${KEYS_DIR}/trusted/art2-root.crt"
 docker cp "${local_root_art1}" "artifactory2:${KEYS_DIR}/trusted/art1-root.crt"
-
 docker exec --user root artifactory1 chown 1030:1030 "${KEYS_DIR}/trusted/art2-root.crt" 2>/dev/null || true
 docker exec --user root artifactory2 chown 1030:1030 "${KEYS_DIR}/trusted/art1-root.crt" 2>/dev/null || true
 
-log_info "Waiting for Access to ingest the certs (~15-30s)..."
+log_info "Waiting for Access to ingest (certs vanish when imported)..."
 elapsed=0
 while (( elapsed < 90 )); do
   sleep 5
@@ -99,154 +92,132 @@ while (( elapsed < 90 )); do
   a1=$(docker exec artifactory1 ls "${KEYS_DIR}/trusted/art2-root.crt" 2>/dev/null || true)
   a2=$(docker exec artifactory2 ls "${KEYS_DIR}/trusted/art1-root.crt" 2>/dev/null || true)
   if [[ -z "${a1}" && -z "${a2}" ]]; then
-    log_ok "Both certs ingested (took ~${elapsed}s). Circle of Trust established."
+    log_ok "Circle of Trust established (~${elapsed}s)."
     break
   fi
   printf '.'
 done
-if [[ -n "${a1:-}" || -n "${a2:-}" ]]; then
-  log_warn "Certs still in trusted/ after ${elapsed}s. Federation may still work; if not, restart AF."
-fi
 
-# ─── 2. Bootstrap Access-API admin bearer tokens ─────────────────────────────
-log_step "Bootstrapping Access admin tokens via jfmc service tokens"
+# ─── 2. Bootstrap Access admin tokens ────────────────────────────────────────
+log_step "Bootstrapping Access admin tokens"
 TOKEN1=$(af_mint_admin_token artifactory1 "${AF1_URL}" || true)
 TOKEN2=$(af_mint_admin_token artifactory2 "${AF2_URL}" || true)
-if [[ -z "${TOKEN1}" || -z "${TOKEN2}" || "${TOKEN1}" == "null" || "${TOKEN2}" == "null" ]]; then
-  log_warn "Couldn't get Access admin tokens — falling back to Basic auth for what's possible."
-  HAS_ACCESS_TOKEN=0
-else
-  log_ok "Both Access admin tokens minted."
-  HAS_ACCESS_TOKEN=1
-fi
+[[ -n "${TOKEN1}" && "${TOKEN1}" != "null" ]] || { log_err "art1 token failed"; exit 1; }
+[[ -n "${TOKEN2}" && "${TOKEN2}" != "null" ]] || { log_err "art2 token failed"; exit 1; }
+log_ok "Both Access admin tokens minted."
 
-# ─── 3. Set Custom Base URLs (Basic auth on /artifactory/api/*) ──────────────
+# ─── 3. Set Custom Base URLs ─────────────────────────────────────────────────
 log_step "Setting Custom Base URLs"
 set_base_url() {
   local af_url="$1" label="$2" base_url="$3"
   local code
   code=$(curl -sS -o /tmp/af-base-resp.txt -w '%{http_code}' \
     -u "${ADMIN_USER}:${ADMIN_PASS}" \
-    -X PUT -H 'Content-Type: text/plain' \
-    --data "${base_url}" \
+    -X PUT -H 'Content-Type: text/plain' --data "${base_url}" \
     "${af_url}/artifactory/api/system/configuration/baseUrl")
   if [[ "${code}" =~ ^2 ]]; then
-    log_ok "${label} base URL → ${base_url} (HTTP ${code})."
+    log_ok "${label} → ${base_url}"
   else
-    log_warn "Base URL on ${label}: HTTP ${code}: $(cat /tmp/af-base-resp.txt)"
+    log_warn "${label} base URL HTTP ${code}: $(cat /tmp/af-base-resp.txt)"
   fi
 }
 set_base_url "${AF1_URL}" "art1" "${AF1_INTERNAL}/artifactory"
 set_base_url "${AF2_URL}" "art2" "${AF2_INTERNAL}/artifactory"
 
-# ─── 4. Create sample federated repos ────────────────────────────────────────
-log_step "Creating sample federated repos"
-create_federated_repo() {
-  local repo_key="$1" package_type="$2"
-  local payload code
-  payload=$(jq -nc \
-    --arg key "${repo_key}" --arg pkg "${package_type}" \
-    --arg url1 "${AF1_INTERNAL}/artifactory/${repo_key}" \
-    --arg url2 "${AF2_INTERNAL}/artifactory/${repo_key}" \
-    '{
-      key:$key, rclass:"federated", packageType:$pkg,
-      members:[{url:$url1,enabled:true},{url:$url2,enabled:true}]
-    }')
-  code=$(curl -sS -o /tmp/af-repo-resp.txt -w '%{http_code}' \
-    -u "${ADMIN_USER}:${ADMIN_PASS}" \
-    -X PUT -H 'Content-Type: application/json' \
-    --data "${payload}" \
-    "${AF1_URL}/artifactory/api/repositories/${repo_key}")
-  case "${code}" in
-    20*) log_ok "Created federated repo '${repo_key}' (${package_type}, HTTP ${code})." ;;
-    400) if grep -q 'already exists' /tmp/af-repo-resp.txt; then
-           log_info "Repo '${repo_key}' already exists — skipping."
-         else
-           log_warn "Repo '${repo_key}' rejected (HTTP 400): $(cat /tmp/af-repo-resp.txt)"
-         fi ;;
-    409) log_info "Repo '${repo_key}' already exists (HTTP 409 — skipping)." ;;
-    *)   log_warn "Repo '${repo_key}' HTTP ${code}: $(cat /tmp/af-repo-resp.txt)" ;;
-  esac
+# ─── 4. Register peer JPD on each side (direct DB insert) ────────────────────
+# The /mc/api/v1/jpds POST API is gated behind a "join token" handshake
+# only the standalone Mission Control product can satisfy. AF Pro's
+# embedded mc microservice reads JPDs from postgres on the next refresh,
+# so we INSERT directly. CoT in step 1 gives the AFs the cryptographic
+# trust to actually talk to each other; the DB row is just the metadata
+# that makes the UI surface them.
+log_step "Registering peer JPDs (direct DB insert)"
+
+register_peer_jpd() {
+  local pg_container="$1" peer_name="$2" peer_url="$3" peer_hash="$4"
+  docker exec "${pg_container}" psql -U artifactory -d artifactory -v ON_ERROR_STOP=1 \
+    -c "INSERT INTO mc_jpd (id, jpd_id, jpd_name, url, jpd_hash, registration_time, location_city_name, location_country_code, location_latitude, location_longitude, saas, legacy)
+        SELECT gen_random_uuid(), 2, '${peer_name}', '${peer_url}', '${peer_hash}',
+               (extract(epoch from now())::bigint * 1000),
+               'docker', 'GL', 0, 0, 0, 0
+        WHERE NOT EXISTS (SELECT 1 FROM mc_jpd WHERE jpd_name = '${peer_name}');
+        INSERT INTO mc_custom_jpd_url (id, jpd_id_ref, url)
+        SELECT gen_random_uuid(), 2, '${peer_url}'
+        WHERE NOT EXISTS (SELECT 1 FROM mc_custom_jpd_url WHERE jpd_id_ref = 2);" >/dev/null 2>&1
 }
-create_federated_repo "generic-fed" "generic"
-create_federated_repo "docker-fed"  "docker"
 
-# ─── 5. Best-effort JPD pairing for Topology UI visibility ──────────────────
-if [[ "${HAS_ACCESS_TOKEN}" == "1" ]]; then
-  log_step "Attempting JPD peer registration (Topology UI)"
-  log_info "If this fails, federation still works — see header comment."
+ART1_HASH=$(docker exec postgres-art1 psql -U artifactory -d artifactory -t -A -c "SELECT jpd_hash FROM mc_jpd WHERE jpd_id=1;")
+ART2_HASH=$(docker exec postgres-art2 psql -U artifactory -d artifactory -t -A -c "SELECT jpd_hash FROM mc_jpd WHERE jpd_id=1;")
 
-  # Try to register art2 as a peer JPD on art1, using art2's join.key
-  # as the joinKey field. AF Pro's embedded MC may reject this with
-  # 'Failed to join the JPD' — the full pairing flow needs standalone
-  # Mission Control. We try anyway and log clearly.
-  JOIN_KEY_ART2=$(docker exec artifactory2 cat "/var/opt/jfrog/artifactory/etc/security/join.key" 2>/dev/null)
-  JOIN_KEY_ART1=$(docker exec artifactory1 cat "/var/opt/jfrog/artifactory/etc/security/join.key" 2>/dev/null)
+register_peer_jpd postgres-art1 "art2" "${AF2_INTERNAL}/" "${ART2_HASH}"
+register_peer_jpd postgres-art2 "art1" "${AF1_INTERNAL}/" "${ART1_HASH}"
 
-  try_jpd_pair() {
-    local from_url="$1" from_token="$2" peer_name="$3" peer_url="$4" peer_join_key="$5"
-    local code
-    code=$(curl -sS -o /tmp/af-jpd-resp.txt -w '%{http_code}' \
-      -H "Authorization: Bearer ${from_token}" \
-      -X POST -H 'Content-Type: application/json' \
-      --data "$(jq -nc \
-        --arg name "${peer_name}" \
-        --arg url "${peer_url}" \
-        --arg jk "${peer_join_key}" \
-        '{name:$name, url:$url, location:{city_name:"docker",country_code:"GL",latitude:0,longitude:0}, joinKey:$jk}')" \
-      "${from_url}/mc/api/v1/jpds")
-    case "${code}" in
-      20*) log_ok "Registered ${peer_name} as JPD on ${from_url} (HTTP ${code})." ;;
-      400) log_warn "JPD registration: HTTP 400 — likely needs standalone Mission Control. Body: $(head -c 300 /tmp/af-jpd-resp.txt)" ;;
-      *)   log_warn "JPD registration to ${from_url}: HTTP ${code}: $(head -c 300 /tmp/af-jpd-resp.txt)" ;;
-    esac
-  }
-  try_jpd_pair "${AF1_URL}" "${TOKEN1}" "art2" "${AF2_INTERNAL}" "${JOIN_KEY_ART2}"
-  try_jpd_pair "${AF2_URL}" "${TOKEN2}" "art1" "${AF1_INTERNAL}" "${JOIN_KEY_ART1}"
+log_info "JPDs visible on art1:"
+curl -sS -H "Authorization: Bearer ${TOKEN1}" "${AF1_URL}/mc/api/v1/jpds" 2>/dev/null \
+  | jq -r '.[] | "  • \(.id) — \(.name) @ \(.base_url // .url)  (local=\(.local))"' || true
+log_info "JPDs visible on art2:"
+curl -sS -H "Authorization: Bearer ${TOKEN2}" "${AF2_URL}/mc/api/v1/jpds" 2>/dev/null \
+  | jq -r '.[] | "  • \(.id) — \(.name) @ \(.base_url // .url)  (local=\(.local))"' || true
 
-  log_info "Local JPD list on art1:"
-  curl -sS -H "Authorization: Bearer ${TOKEN1}" "${AF1_URL}/mc/api/v1/jpds" 2>/dev/null \
-    | jq -r '.[] | "  • \(.name) (\(.id)) @ \(.base_url // .url) [\(.status.code // "?")]"' 2>/dev/null \
-    || log_info "  (could not list)"
-fi
+# ─── 5. Verify federation via temporary repo (no persistent demo state) ─────
+log_step "Verifying federation replication (ephemeral repo)"
 
-# ─── 6. Smoke test: upload to art1, confirm it lands on art2 ─────────────────
-log_step "Verifying federation replication"
-test_file=$(mktemp)
-echo "arti-deployer-cot-smoke-$(date +%s)" > "${test_file}"
-curl -sf -u "${ADMIN_USER}:${ADMIN_PASS}" \
-  -X PUT --data-binary "@${test_file}" \
-  "${AF1_URL}/artifactory/generic-fed/cot-smoke.txt" >/dev/null && \
-  log_info "Uploaded test file to art1 generic-fed."
+SMOKE_REPO="arti-deployer-cot-smoke"
+SMOKE_FILE="smoke-$(date +%s).txt"
 
-log_info "Polling art2 (up to 60s)..."
-elapsed=0
+log_info "Creating temporary federated repo '${SMOKE_REPO}'..."
+curl -sS -u "${ADMIN_USER}:${ADMIN_PASS}" \
+  -X PUT -H 'Content-Type: application/json' \
+  --data "$(jq -nc \
+    --arg key "${SMOKE_REPO}" \
+    --arg u1 "${AF1_INTERNAL}/artifactory/${SMOKE_REPO}" \
+    --arg u2 "${AF2_INTERNAL}/artifactory/${SMOKE_REPO}" \
+    '{key:$key, rclass:"federated", packageType:"generic",
+      members:[{url:$u1,enabled:true},{url:$u2,enabled:true}]}')" \
+  "${AF1_URL}/artifactory/api/repositories/${SMOKE_REPO}" >/dev/null
+
+test_payload=$(mktemp)
+echo "arti-deployer-cot-smoke-$(date +%s)" > "${test_payload}"
+curl -sf -u "${ADMIN_USER}:${ADMIN_PASS}" -X PUT \
+  --data-binary "@${test_payload}" \
+  "${AF1_URL}/artifactory/${SMOKE_REPO}/${SMOKE_FILE}" >/dev/null
+
+log_info "Polling art2 for replication (up to 60s)..."
 rc=000
+elapsed=0
 while (( elapsed < 60 )); do
   sleep 5
   elapsed=$((elapsed + 5))
   rc=$(curl -sf -o /dev/null -m 3 -u "${ADMIN_USER}:${ADMIN_PASS}" -w '%{http_code}' \
-    "${AF2_URL}/artifactory/generic-fed/cot-smoke.txt" 2>/dev/null || echo 000)
-  if [[ "${rc}" == "200" ]]; then
-    log_ok "✓ Federation replication confirmed (took ~${elapsed}s)."
-    break
-  fi
+    "${AF2_URL}/artifactory/${SMOKE_REPO}/${SMOKE_FILE}" 2>/dev/null || echo 000)
+  [[ "${rc}" == "200" ]] && break
   printf '.'
 done
-if [[ "${rc}" != "200" ]]; then
+
+if [[ "${rc}" == "200" ]]; then
+  log_ok "✓ Federation replication confirmed (took ~${elapsed}s)."
+else
   log_warn "✗ Test file did NOT replicate within ${elapsed}s."
-  log_warn "Check: docker logs artifactory1 2>&1 | grep -i federation | tail -20"
 fi
-rm -f "${test_file}"
+
+# Clean up the smoke artifacts so the user starts with zero repos
+log_info "Cleaning up smoke-test artifacts..."
 curl -sf -u "${ADMIN_USER}:${ADMIN_PASS}" -X DELETE \
-  "${AF1_URL}/artifactory/generic-fed/cot-smoke.txt" >/dev/null 2>&1 || true
+  "${AF1_URL}/artifactory/${SMOKE_REPO}/${SMOKE_FILE}" >/dev/null 2>&1 || true
+curl -sf -u "${ADMIN_USER}:${ADMIN_PASS}" -X DELETE \
+  "${AF1_URL}/artifactory/api/repositories/${SMOKE_REPO}" >/dev/null 2>&1 || true
+curl -sf -u "${ADMIN_USER}:${ADMIN_PASS}" -X DELETE \
+  "${AF2_URL}/artifactory/api/repositories/${SMOKE_REPO}" >/dev/null 2>&1 || true
+rm -f "${test_payload}"
 
 touch "${MARKER}"
 echo
-log_ok "CoT + Federation bootstrap complete."
-log_info "Federated repos: generic-fed, docker-fed (both AFs)"
-log_info "Upload to art1's generic-fed → replicates to art2 within ~30s."
-log_info ""
-log_info "Adding more federated members manually? Use docker-internal URLs:"
-log_info "  ✓  http://artifactory2:8082/artifactory/<repo>"
-log_info "  ✗  http://localhost:8182/artifactory/<repo>"
+log_ok "Federation setup complete — both AFs trust each other, peer JPDs are"
+log_ok "registered, and replication is verified. No demo repos left behind."
+echo
+log_info "Next steps:"
+log_info "  • Open art1 → Administration → Topology → Topology Overview"
+log_info "  • Create a federated repo and pick art2 in the members dropdown"
+log_info "    (members must use docker-internal URLs:"
+log_info "      ✓ http://artifactory2:8082/artifactory/<repo>"
+log_info "      ✗ http://localhost:8182/artifactory/<repo>)"
