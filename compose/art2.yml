@@ -67,4 +67,3 @@ volumes:
 networks:
   arti-net:
     name: arti-deployer_net
-    external: true
