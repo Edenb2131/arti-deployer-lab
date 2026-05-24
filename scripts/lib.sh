@@ -211,9 +211,9 @@ print_summary() {
     "$(cat <<EOF
 arti-deployer is up.
 
-Artifactory 1 UI:  http://localhost:${AF1_HTTP_PORT}/ui/
-Artifactory 1 API: http://localhost:${AF1_ROUTER_PORT}/artifactory/
-$([[ "${INSTANCE_COUNT}" == "2" ]] && printf "Artifactory 2 UI:  http://localhost:%s/ui/\nArtifactory 2 API: http://localhost:%s/artifactory/\n" "${AF2_HTTP_PORT}" "${AF2_ROUTER_PORT}")
+Artifactory 1 UI:  http://localhost:${AF1_ROUTER_PORT}/ui/
+Artifactory 1 API: http://localhost:${AF1_ROUTER_PORT}/artifactory/api/
+$([[ "${INSTANCE_COUNT}" == "2" ]] && printf "Artifactory 2 UI:  http://localhost:%s/ui/\nArtifactory 2 API: http://localhost:%s/artifactory/api/\n" "${AF2_ROUTER_PORT}" "${AF2_ROUTER_PORT}")
 $([[ "${USE_NGINX}" == "1" ]] && printf "NGINX (HTTP):      http://localhost:%s/\n" "${NGINX_HTTP_PORT}")
 $([[ "${USE_NGINX_HTTPS}" == "1" ]] && printf "NGINX (HTTPS):     https://localhost:%s/  (self-signed)\n" "${NGINX_HTTPS_PORT}")
 $([[ "${USE_KEYCLOAK}" == "1" ]] && printf "Keycloak admin:    http://localhost:%s/  (admin / \$KEYCLOAK_ADMIN_PASSWORD)\n" "${KEYCLOAK_PORT}")

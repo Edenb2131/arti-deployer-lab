@@ -68,7 +68,23 @@ trust_cert() {
 trust_cert "${AF1_URL}" "art1" "${CERT2}" "art2-root"
 trust_cert "${AF2_URL}" "art2" "${CERT1}" "art1-root"
 
-# ─── 3. Access Federation: register each as a trusted peer ───────────────────
+# ─── 3. Set Custom Base URL on each instance ─────────────────────────────────
+# Federated repos require a Custom Base URL to be configured (AF UI shows
+# "Federated repository requires a Custom Base URL" otherwise). Each AF
+# advertises its own URL so the other side can reach it for federation.
+set_base_url() {
+  local target_url="$1" target_label="$2" base_url="$3"
+  log_info "Setting Custom Base URL on ${target_label} → ${base_url}"
+  af_curl "${target_url}/artifactory/api/system/configuration/baseUrl" \
+    -X PUT -H 'Content-Type: text/plain' \
+    --data "${base_url}" \
+    >/dev/null || fail_soft "Base URL update on ${target_label} failed."
+}
+
+set_base_url "${AF1_URL}" "art1" "${AF1_INTERNAL}/artifactory"
+set_base_url "${AF2_URL}" "art2" "${AF2_INTERNAL}/artifactory"
+
+# ─── 4. Access Federation: register each as a trusted peer ───────────────────
 # Access Federation propagates users, groups, permissions, and access tokens
 # across CoT members. The federation topology API:
 #   POST /access/api/v1/topology/federation_target
@@ -80,7 +96,7 @@ af_curl "${AF1_URL}/access/api/v1/topology/federation_target" \
   --data "$(jq -nc --arg url "${AF2_INTERNAL}" '{target_url:$url, propagate_groups:true, propagate_users:true, propagate_permissions:true}')" \
   >/dev/null || fail_soft "Federation target registration on art1 failed. Configure manually in UI."
 
-# ─── 4. Sample federated generic repo as smoke test ──────────────────────────
+# ─── 5. Sample federated generic repo as smoke test ──────────────────────────
 log_info "Creating sample federated repo 'generic-federated' on art1..."
 af_curl "${AF1_URL}/artifactory/api/repositories/generic-federated" \
   -X PUT -H 'Content-Type: application/json' \
