@@ -71,7 +71,7 @@ for n in "${NETWORKS[@]}"; do
   docker network inspect "${n}" --format '  - {{.Name}}' 2>/dev/null || echo "  - ${n}"
 done
 
-declare -a FILE_PATTERNS=(
+FILE_PATTERNS=(
   "${CONFIG_DIR}/art1/system.yaml"
   "${CONFIG_DIR}/art2/system.yaml"
   "${CONFIG_DIR}/keycloak/realm.json"

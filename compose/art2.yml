@@ -48,6 +48,9 @@ services:
     volumes:
       - artifactory2-data:/var/opt/jfrog/artifactory
       - ../config/art2/artifactory.lic:/artifactory_extra_conf/artifactory.lic:ro
+      # system.yaml enables Mission Control — required for Access Federation
+      # JPD pairing. See config/art1/system.yaml.tmpl for the full reason.
+      - ../config/art2/system.yaml:/artifactory_extra_conf/system.yaml:ro
     networks:
       arti-net:
         aliases: [artifactory2]

@@ -1,24 +1,20 @@
-## Artifactory 1 — system.yaml (TEMPLATE)
-## Docs: https://jfrog.com/help/r/jfrog-installation-setup-documentation/system-yaml-file-descriptive
-##
-## This file is rendered by scripts/render-templates.sh — `${...}` placeholders
-## are substituted from .env at runtime. The rendered output (system.yaml) is
-## gitignored.
+# Minimal system.yaml for art1.
+#
+# Only purpose: enable Mission Control. Access Federation / JPD pairing
+# endpoints (POST /access/api/v1/system/jpd/pair, /bind) are gated on
+# this flag — without it the API returns 404 and federation can't be
+# bootstrapped non-interactively.
+#
+# Per https://jfrog.com/help/r/artifactory-setup-access-federation-step-by-step/step-1-enable-mission-control
+#
+# All other AF config (database, node, security) still comes from
+# JF_SHARED_DATABASE_* env vars in compose/art1.yml — they take effect
+# even with this file present, since system.yaml is additive (set values
+# override env; unset values pass through).
+#
+# This file is rendered by scripts/render-templates.sh (no ${...} subs
+# here today, but kept as .tmpl for consistency with the other configs).
 configVersion: 1
 
-shared:
-  node:
-    id: art1
-    name: art1
-  database:
-    type: postgresql
-    driver: org.postgresql.Driver
-    url: jdbc:postgresql://postgres-art1:5432/artifactory
-    username: artifactory
-    password: ${PG_AF1_PASSWORD}
-# Security keys (joinKey/masterKey) deliberately omitted — AF auto-generates
-# them on first boot when not provided here. They live in:
-#   /var/opt/jfrog/artifactory/var/etc/security/master.key
-#   /var/opt/jfrog/artifactory/var/etc/security/join.key
-# For dual-instance topology, copy these between art1 and art2 BEFORE
-# starting art2 (configure-cot.sh handles that separately).
+mc:
+  enabled: true

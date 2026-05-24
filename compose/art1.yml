@@ -49,9 +49,14 @@ services:
       - "${AF1_ROUTER_PORT}:8082"
     volumes:
       - artifactory1-data:/var/opt/jfrog/artifactory
-      # Drop license in /artifactory_extra_conf/ — AF copies it into the
-      # right place during first-boot bootstrap.
+      # Drop-ins copied into /var/opt/jfrog/artifactory/var/etc/ on
+      # first boot. Avoids the race where binding a file into the empty
+      # volume leaves the container in Created state.
       - ../config/art1/artifactory.lic:/artifactory_extra_conf/artifactory.lic:ro
+      # system.yaml enables Mission Control (mc.enabled: true) so the
+      # Access Federation JPD pairing endpoints exist. Required by:
+      # https://jfrog.com/help/r/artifactory-setup-access-federation-step-by-step/step-1-enable-mission-control
+      - ../config/art1/system.yaml:/artifactory_extra_conf/system.yaml:ro
     networks:
       arti-net:
         aliases: [artifactory1]
