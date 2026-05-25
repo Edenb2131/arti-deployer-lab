@@ -83,12 +83,26 @@ cd arti-deployer-lab
 ```
 arti-deployer-lab/
 ├── arti-deployer         # main entrypoint
+├── deploy-artifacts.py   # add-on: populate the lab with artifacts (see docs/deploy-artifacts.md)
 ├── compose/              # one compose file per topology / overlay
 ├── config/               # per-service config (system.yaml.tmpl, nginx.conf, etc.)
 ├── scripts/              # post-startup configurators (CoT, LDAP) + helpers
 ├── docs/                 # one .md per feature
+├── requirements.txt      # python deps for deploy-artifacts.py
 └── .env.example
 ```
+
+### Populate with artifacts (optional add-on)
+
+After `up`, you can spin up a populated environment (real packages
+pulled through real repos, JFrog Builds recorded) with:
+
+```bash
+pip install -r requirements.txt
+./deploy-artifacts.py             # docker + npm + pypi against art1
+```
+
+See [docs/deploy-artifacts.md](docs/deploy-artifacts.md) for all options.
 
 ## Safety notes
 
