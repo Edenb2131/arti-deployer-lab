@@ -16,7 +16,6 @@ $ ./arti-deployer
 ? Add NGINX reverse proxy?            (y/N)
 ?   Use HTTPS for NGINX?              (y/N)   [only if NGINX = y]
 ? Add LDAP server?                    (y/N)
-? Add Keycloak (OIDC) provider?       (y/N)
 ? Use AF_VERSION 7.111.9?             (y/N)
 ? License for AF#1: paste / file / keep / clear
 ```
@@ -29,10 +28,9 @@ $ ./arti-deployer
 | Two AF + auto CoT + Access Federation | ✅ wired (best-effort REST bootstrap) | [docs/cot-federation.md](docs/cot-federation.md) |
 | NGINX (HTTP or HTTPS) | ✅ wired end-to-end | [docs/nginx.md](docs/nginx.md) |
 | LDAP (OpenLDAP) | ✅ wired end-to-end (osixia/openldap, dc=example,dc=org) | [docs/ldap.md](docs/ldap.md) |
-| Keycloak (OIDC) | ✅ wired (token-exchange + UI SSO via Access 7.100+ API) | [docs/keycloak.md](docs/keycloak.md) |
 
-QA'd across all 24 active combinations of `{1, 2 instances} × {no-nginx, http,
-https} × {0,1 LDAP} × {0,1 Keycloak}` — all pass.
+QA'd across all 12 active combinations of `{1, 2 instances} × {no-nginx, http,
+https} × {0,1 LDAP}` — all pass.
 
 ## Requirements
 
@@ -72,12 +70,12 @@ cd arti-deployer-lab
 ### Non-interactive flags (`up`)
 
 ```bash
-./arti-deployer up --instances 2 --https --ldap --keycloak --yes
+./arti-deployer up --instances 2 --https --ldap --yes
 ```
 
 - `--instances {1|2}` — number of AF instances (2 enables CoT)
 - `--nginx` / `--https` — NGINX in front, optionally with self-signed HTTPS
-- `--ldap` / `--keycloak` — add the corresponding overlay
+- `--ldap` — add the LDAP overlay
 - `--yes` — skip the final "Proceed?" confirmation
 
 ## Layout
@@ -87,7 +85,7 @@ arti-deployer-lab/
 ├── arti-deployer         # main entrypoint
 ├── compose/              # one compose file per topology / overlay
 ├── config/               # per-service config (system.yaml.tmpl, nginx.conf, etc.)
-├── scripts/              # post-startup configurators (CoT, LDAP, Keycloak) + helpers
+├── scripts/              # post-startup configurators (CoT, LDAP) + helpers
 ├── docs/                 # one .md per feature
 └── .env.example
 ```

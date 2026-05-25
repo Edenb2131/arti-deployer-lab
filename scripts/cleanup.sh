@@ -2,13 +2,13 @@
 # cleanup.sh — Tear down EVERYTHING this lab created and prove it.
 #
 # What gets removed:
-#   - All compose-managed containers (artifactory, postgres, nginx, ldap,
-#     keycloak services), via `docker compose down -v --remove-orphans`
+#   - All compose-managed containers (artifactory, postgres, nginx, ldap
+#     services), via `docker compose down -v --remove-orphans`
 #     to release file handles cleanly, then forced removal as a safety net
 #   - All named volumes (arti-deployer_*)
 #   - The shared docker network (arti-deployer_net)
 #   - Any anonymous volumes attached to lab containers
-#   - Rendered configs (config/**/{system.yaml,realm.json,*.ldif})
+#   - Rendered configs (config/**/{system.yaml,*.ldif})
 #   - Generated cert files (config/nginx/certs/server.*)
 #   - Generated license drop-ins (config/art{1,2}/artifactory.lic)
 #   - State markers (.arti-deployer/, including all *.configured flags)
@@ -52,12 +52,11 @@ while IFS= read -r line; do [[ -n "$line" ]] && CONTAINERS+=("$line"); done < <(
   docker ps -aq --filter 'name=artifactory1' --filter 'name=artifactory2' \
                 --filter 'name=postgres-art1' --filter 'name=postgres-art2' \
                 --filter 'name=arti-nginx' --filter 'name=arti-openldap' \
-                --filter 'name=arti-keycloak' \
     2>/dev/null
 )
 VOLUMES=()
 while IFS= read -r line; do [[ -n "$line" ]] && VOLUMES+=("$line"); done \
-  < <(docker volume ls -q  --filter 'name=arti-deployer_' 2>/dev/null)
+  < <(docker volume ls -q  --filter 'name=arti-deployer_' 2>/dev/null || true)
 NETWORKS=()
 while IFS= read -r line; do [[ -n "$line" ]] && NETWORKS+=("$line"); done \
   < <(docker network ls -q --filter 'name=arti-deployer_' 2>/dev/null)
@@ -80,7 +79,6 @@ done
 FILE_PATTERNS=(
   "${CONFIG_DIR}/art1/system.yaml"
   "${CONFIG_DIR}/art2/system.yaml"
-  "${CONFIG_DIR}/keycloak/realm.json"
   "${CONFIG_DIR}/ldap/ldifs/*.ldif"
   "${CONFIG_DIR}/nginx/certs/server.crt"
   "${CONFIG_DIR}/nginx/certs/server.key"
@@ -121,7 +119,7 @@ fi
 log_step "docker compose down -v --remove-orphans"
 cd "${ROOT_DIR}"
 COMPOSE_FILES=( -f compose/art1.yml -f compose/art2.yml -f compose/nginx.yml \
-                -f compose/nginx-https.yml -f compose/ldap.yml -f compose/keycloak.yml )
+                -f compose/nginx-https.yml -f compose/ldap.yml )
 docker compose --env-file .env "${COMPOSE_FILES[@]}" down -v --remove-orphans 2>&1 \
   | sed 's/^/  /' || true
 
@@ -161,7 +159,7 @@ leftover=0
 c_left=$(docker ps -aq --filter 'name=artifactory1' --filter 'name=artifactory2' \
             --filter 'name=postgres-art1' --filter 'name=postgres-art2' \
             --filter 'name=arti-nginx' --filter 'name=arti-openldap' \
-            --filter 'name=arti-keycloak' 2>/dev/null | wc -l | tr -d ' ')
+            2>/dev/null | wc -l | tr -d ' ')
 v_left=$(docker volume ls -q --filter 'name=arti-deployer_' 2>/dev/null | wc -l | tr -d ' ')
 n_left=$(docker network ls -q --filter 'name=arti-deployer_' 2>/dev/null | wc -l | tr -d ' ')
 
@@ -175,7 +173,7 @@ if [[ "${c_left}" != "0" || "${v_left}" != "0" || "${n_left}" != "0" ]]; then
   docker ps -a    --filter 'name=artifactory1' --filter 'name=artifactory2' \
                   --filter 'name=postgres-art1' --filter 'name=postgres-art2' \
                   --filter 'name=arti-nginx'   --filter 'name=arti-openldap' \
-                  --filter 'name=arti-keycloak' --format '    container: {{.Names}} ({{.Status}})' 2>/dev/null
+                  --format '    container: {{.Names}} ({{.Status}})' 2>/dev/null
   docker volume ls --filter 'name=arti-deployer_' --format '    volume: {{.Name}}' 2>/dev/null
   docker network ls --filter 'name=arti-deployer_' --format '    network: {{.Name}}' 2>/dev/null
 fi

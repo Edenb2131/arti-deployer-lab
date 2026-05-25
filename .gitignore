@@ -8,7 +8,6 @@ artifactory.lic
 # Rendered configs (templates are committed as *.tmpl; outputs are local-only)
 config/art1/system.yaml
 config/art2/system.yaml
-config/keycloak/realm.json
 config/ldap/ldifs/*.ldif
 !config/ldap/ldifs/*.ldif.tmpl
 

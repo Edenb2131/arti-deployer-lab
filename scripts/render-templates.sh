@@ -19,8 +19,6 @@ SUBST_VARS=(
   PG_AF2_PASSWORD
   LDAP_ADMIN_PASSWORD
   LDAP_USER_PASSWORD
-  KEYCLOAK_ADMIN_PASSWORD
-  KEYCLOAK_CLIENT_SECRET
 )
 
 # ─── Validate that every required var is non-empty ───────────────────────────

@@ -56,7 +56,6 @@ In `arti-deployer`, the `wizard()` function — add `SAML` to the multi-select:
 configs=$(gum choose --no-limit ... \
   "NGINX (reverse proxy)" \
   "LDAP" \
-  "Keycloak (OIDC)" \
   "SAML (SimpleSAMLphp)" || true)
 
 USE_SAML=0
@@ -104,7 +103,8 @@ Mirror the structure of existing overlay docs:
 
 | Overlay | Why it matters for support |
 |---|---|
-| **SAML** (SimpleSAMLphp) | Many enterprise customers; complements Keycloak |
+| **SAML** (SimpleSAMLphp) | Many enterprise customers; covers the IdP-side SSO flows |
+| **Keycloak (OIDC)** | OIDC token-exchange + UI SSO via Access 7.100+ API |
 | **Active Directory** (samba) | AD-specific group sync quirks that plain LDAP doesn't have |
 | **MinIO S3 filestore** | Filestore migration / latency tickets |
 | **MySQL / MSSQL / Oracle DB** | DB-specific schema issues — swap Postgres for one of these |

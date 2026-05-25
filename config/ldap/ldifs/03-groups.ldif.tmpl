@@ -1,16 +1,41 @@
-# Groups — each contains User1-User3 (static membership), matching newscript.sh
+# Groups — role-based fixture for App Support repros.
+# Memberships are intentionally disjoint / overlapping so you can repro
+# permission-scenario tickets (user-with-no-groups, single-group, multi-
+# group, group-overlap). user4 is deliberately group-less.
 dn: cn=group1,ou=Groups,ou=Organization,dc=example,dc=org
 objectClass: groupOfNames
 objectClass: top
 cn: group1
+description: legacy compat group (was user1+user2+user3); narrowed for repros
 member: cn=User1,ou=Users,ou=Organization,dc=example,dc=org
 member: cn=User2,ou=Users,ou=Organization,dc=example,dc=org
-member: cn=User3,ou=Users,ou=Organization,dc=example,dc=org
 
 dn: cn=group2,ou=Groups,ou=Organization,dc=example,dc=org
 objectClass: groupOfNames
 objectClass: top
 cn: group2
-member: cn=User1,ou=Users,ou=Organization,dc=example,dc=org
+description: legacy compat group; overlaps group1 via user2
 member: cn=User2,ou=Users,ou=Organization,dc=example,dc=org
 member: cn=User3,ou=Users,ou=Organization,dc=example,dc=org
+
+dn: cn=developers,ou=Groups,ou=Organization,dc=example,dc=org
+objectClass: groupOfNames
+objectClass: top
+cn: developers
+description: developers role
+member: cn=User1,ou=Users,ou=Organization,dc=example,dc=org
+member: cn=User2,ou=Users,ou=Organization,dc=example,dc=org
+
+dn: cn=qa,ou=Groups,ou=Organization,dc=example,dc=org
+objectClass: groupOfNames
+objectClass: top
+cn: qa
+description: QA role
+member: cn=User3,ou=Users,ou=Organization,dc=example,dc=org
+
+dn: cn=admins,ou=Groups,ou=Organization,dc=example,dc=org
+objectClass: groupOfNames
+objectClass: top
+cn: admins
+description: admin role (single-member group)
+member: cn=User1,ou=Users,ou=Organization,dc=example,dc=org

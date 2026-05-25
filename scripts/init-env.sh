@@ -29,8 +29,6 @@ PG_AF1_VAL=$(gen_passwd)
 PG_AF2_VAL=$(gen_passwd)
 LDAP_ADMIN_VAL=$(gen_passwd)
 LDAP_USER_VAL=$(gen_passwd)
-KC_ADMIN_VAL=$(gen_passwd)
-KC_CLIENT_VAL=$(gen_passwd)
 
 # ─── Build .env by copying .env.example and replacing empty values ───────────
 cp "${ENV_EXAMPLE}" "${ENV_FILE}"
@@ -51,8 +49,6 @@ set_var PG_AF1_PASSWORD        "${PG_AF1_VAL}"
 set_var PG_AF2_PASSWORD        "${PG_AF2_VAL}"
 set_var LDAP_ADMIN_PASSWORD    "${LDAP_ADMIN_VAL}"
 set_var LDAP_USER_PASSWORD     "${LDAP_USER_VAL}"
-set_var KEYCLOAK_ADMIN_PASSWORD "${KC_ADMIN_VAL}"
-set_var KEYCLOAK_CLIENT_SECRET "${KC_CLIENT_VAL}"
 
 chmod 600 "${ENV_FILE}"
 
@@ -62,5 +58,4 @@ log_warn "ARTIFACTORY_LICENSE is still empty — paste your license into .env be
 log_info "Or set ARTIFACTORY_LICENSE_FILE=/absolute/path/to/artifactory.lic"
 echo
 log_info "Sample LDAP user password (alice/bob/carol): ${LDAP_USER_VAL}"
-log_info "Sample Keycloak user password (testuser/kcadmin): see .env (KEYCLOAK_*)"
 log_info "These are also in your .env — do NOT share or commit it."

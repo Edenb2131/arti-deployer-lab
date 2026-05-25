@@ -120,7 +120,6 @@ write_license() {
 #   USE_NGINX       (0/1)
 #   USE_NGINX_HTTPS (0/1)
 #   USE_LDAP        (0/1)
-#   USE_KEYCLOAK    (0/1)
 build_compose_chain() {
   local chain=()
   chain+=("-f" "${COMPOSE_DIR}/art1.yml")
@@ -132,7 +131,6 @@ build_compose_chain() {
     chain+=("-f" "${COMPOSE_DIR}/nginx.yml")
   fi
   [[ "${USE_LDAP}" == "1"     ]] && chain+=("-f" "${COMPOSE_DIR}/ldap.yml")
-  [[ "${USE_KEYCLOAK}" == "1" ]] && chain+=("-f" "${COMPOSE_DIR}/keycloak.yml")
   printf '%s\n' "${chain[@]}"
 }
 
@@ -144,7 +142,6 @@ INSTANCE_COUNT=${INSTANCE_COUNT}
 USE_NGINX=${USE_NGINX}
 USE_NGINX_HTTPS=${USE_NGINX_HTTPS}
 USE_LDAP=${USE_LDAP}
-USE_KEYCLOAK=${USE_KEYCLOAK}
 EOF
 }
 
@@ -155,7 +152,7 @@ load_selection() {
   else
     INSTANCE_COUNT=1
     USE_NGINX=0; USE_NGINX_HTTPS=0
-    USE_LDAP=0; USE_KEYCLOAK=0
+    USE_LDAP=0
   fi
 }
 
@@ -192,20 +189,41 @@ wait_for_af() {
 # ─── URL summary ─────────────────────────────────────────────────────────────
 print_summary() {
   load_selection
+
+  # Pick the right scheme + nginx port for the user-facing URLs
+  local scheme port_suffix
+  if [[ "${USE_NGINX_HTTPS}" == "1" ]]; then
+    scheme="https"; port_suffix=":${NGINX_HTTPS_PORT}"
+  elif [[ "${USE_NGINX}" == "1" ]]; then
+    scheme="http";  port_suffix=":${NGINX_HTTP_PORT}"
+  fi
+
+  # When nginx is on, the recommended URLs go through nginx with per-AF
+  # hostnames (cookie scoping). Direct router-port URLs are shown as a
+  # fallback but flagged because two AFs on plain localhost collide cookies.
+  local af1_url af2_url note
+  if [[ -n "${scheme:-}" ]]; then
+    af1_url="${scheme}://art1.localtest.me${port_suffix}/ui/"
+    af2_url="${scheme}://art2.localtest.me${port_suffix}/ui/"
+    note="Use the art{1,2}.localtest.me URLs in the browser. Plain localhost ports work too, but two-AF labs collide cookies on localhost — pick one."
+  else
+    af1_url="http://localhost:${AF1_ROUTER_PORT}/ui/"
+    af2_url="http://localhost:${AF2_ROUTER_PORT}/ui/"
+    note="No NGINX overlay. With two AFs on localhost, browsers collide cookies — use a separate browser profile per AF, or rerun with --nginx."
+  fi
+
   echo
   gum style --border double --padding "1 2" --border-foreground 51 \
     "$(cat <<EOF
 arti-deployer is up.
 
-Artifactory 1 UI:  http://localhost:${AF1_ROUTER_PORT}/ui/
-Artifactory 1 API: http://localhost:${AF1_ROUTER_PORT}/artifactory/api/
-$([[ "${INSTANCE_COUNT}" == "2" ]] && printf "Artifactory 2 UI:  http://localhost:%s/ui/\nArtifactory 2 API: http://localhost:%s/artifactory/api/\n" "${AF2_ROUTER_PORT}" "${AF2_ROUTER_PORT}")
-$([[ "${USE_NGINX}" == "1" ]] && printf "NGINX (HTTP):      http://localhost:%s/\n" "${NGINX_HTTP_PORT}")
-$([[ "${USE_NGINX_HTTPS}" == "1" ]] && printf "NGINX (HTTPS):     https://localhost:%s/  (self-signed)\n" "${NGINX_HTTPS_PORT}")
-$([[ "${USE_KEYCLOAK}" == "1" ]] && printf "Keycloak admin:    http://localhost:%s/  (admin / \$KEYCLOAK_ADMIN_PASSWORD)\n" "${KEYCLOAK_PORT}")
+Artifactory 1 UI:  ${af1_url}
+$([[ "${INSTANCE_COUNT}" == "2" ]] && printf "Artifactory 2 UI:  %s\n" "${af2_url}")
 $([[ "${USE_LDAP}" == "1" ]] && printf "LDAP:              ldap://localhost:%s  (cn=admin,dc=jfrog,dc=local / \$LDAP_ADMIN_PASSWORD)\n" "${LDAP_PORT}")
 
 Default Artifactory admin: admin / password  (forced change on first login)
+
+Note: ${note}
 EOF
 )"
 }

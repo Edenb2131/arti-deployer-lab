@@ -54,21 +54,66 @@ if [[ -f "${MARKER}" ]]; then
   exit 0
 fi
 
+# ─── Helper: wait for Access to be ready on a given AF ───────────────────────
+# wait_for_af in lib.sh polls /artifactory/api/system/ping (router level) which
+# returns 200 well before Access (jfac) is ready. Token-mint requires Access.
+# Poll /access/api/v1/system/ping until 200 or timeout.
+wait_for_access() {
+  local af_url="$1" label="$2" timeout="${3:-180}"
+  local elapsed=0
+  log_info "Waiting for ${label} Access readiness..."
+  while (( elapsed < timeout )); do
+    if curl -sf -o /dev/null -m 3 "${af_url}/access/api/v1/system/ping"; then
+      log_ok "${label} Access ready (~${elapsed}s)."
+      return 0
+    fi
+    sleep 3
+    elapsed=$((elapsed + 3))
+    printf '.'
+  done
+  echo
+  log_err "${label} Access did not become ready within ${timeout}s."
+  return 1
+}
+
 # ─── Helper: bootstrap an Access-API admin bearer via jfmc token ─────────────
+# The race we kept hitting: even after Access pings 200, the *first* token mint
+# can still fail because the freshly-loaded Access verifier hasn't yet rotated
+# in the keys the jfmc service token was signed with. Retry the mint with a
+# short backoff until it returns a non-empty token.
 af_mint_admin_token() {
-  local container="$1" external_url="$2"
-  local jfmc_token
-  jfmc_token=$(docker exec "${container}" sh -c \
-    'cat /var/opt/jfrog/artifactory/work/mc/temp/access-client-config-store/*/keys/jfmc@*.token' 2>/dev/null)
+  local container="$1" external_url="$2" timeout="${3:-90}"
+  local jfmc_token elapsed=0 response token
+  # 1. Read the on-disk jfmc service token; this file may not exist yet on a
+  # cold boot, so retry until it does.
+  while (( elapsed < timeout )); do
+    jfmc_token=$(docker exec "${container}" sh -c \
+      'cat /var/opt/jfrog/artifactory/work/mc/temp/access-client-config-store/*/keys/jfmc@*.token 2>/dev/null' \
+      2>/dev/null | tr -d '\r\n')
+    [[ -n "${jfmc_token}" ]] && break
+    sleep 3; elapsed=$((elapsed + 3)); printf '.'
+  done
   if [[ -z "${jfmc_token}" ]]; then
-    log_err "Couldn't read jfmc service token from ${container}"
+    log_err "Couldn't read jfmc service token from ${container} after ${timeout}s"
     return 1
   fi
-  curl -sS -H "Authorization: Bearer ${jfmc_token}" \
-    -X POST -H 'Content-Type: application/json' \
-    --data '{"username":"admin","scope":"applied-permissions/admin","audience":"*@*","expires_in":3600,"refreshable":true}' \
-    "${external_url}/access/api/v1/tokens" \
-    | jq -r '.access_token // empty'
+
+  # 2. Mint the admin token, retrying on transient 401/5xx until it works.
+  elapsed=0
+  while (( elapsed < timeout )); do
+    response=$(curl -sS -H "Authorization: Bearer ${jfmc_token}" \
+      -X POST -H 'Content-Type: application/json' \
+      --data '{"username":"admin","scope":"applied-permissions/admin","audience":"*@*","expires_in":3600,"refreshable":true}' \
+      "${external_url}/access/api/v1/tokens" 2>/dev/null)
+    token=$(echo "${response}" | jq -r '.access_token // empty' 2>/dev/null)
+    if [[ -n "${token}" && "${token}" != "null" ]]; then
+      printf '%s' "${token}"
+      return 0
+    fi
+    sleep 3; elapsed=$((elapsed + 3)); printf '.'
+  done
+  log_err "Token mint never succeeded on ${container} (${timeout}s). Last response: ${response:-<empty>}"
+  return 1
 }
 
 # ─── 1. Cross-trust the Access root certificates ─────────────────────────────
@@ -101,10 +146,12 @@ done
 
 # ─── 2. Bootstrap Access admin tokens ────────────────────────────────────────
 log_step "Bootstrapping Access admin tokens"
-TOKEN1=$(af_mint_admin_token artifactory1 "${AF1_URL}" || true)
-TOKEN2=$(af_mint_admin_token artifactory2 "${AF2_URL}" || true)
-[[ -n "${TOKEN1}" && "${TOKEN1}" != "null" ]] || { log_err "art1 token failed"; exit 1; }
-[[ -n "${TOKEN2}" && "${TOKEN2}" != "null" ]] || { log_err "art2 token failed"; exit 1; }
+# Access on the router can come up minutes after AF's legacy /api/system/ping
+# returns 200. Wait explicitly before trying to mint anything.
+wait_for_access "${AF1_URL}" "art1" || exit 1
+wait_for_access "${AF2_URL}" "art2" || exit 1
+TOKEN1=$(af_mint_admin_token artifactory1 "${AF1_URL}") || exit 1
+TOKEN2=$(af_mint_admin_token artifactory2 "${AF2_URL}") || exit 1
 log_ok "Both Access admin tokens minted."
 
 # ─── 3. Set Custom Base URLs ─────────────────────────────────────────────────

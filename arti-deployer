@@ -8,7 +8,7 @@
 #   ./arti-deployer up [flags]      non-interactive (skip wizard); flags:
 #                                     --instances {1|2}
 #                                     --nginx | --https   (--https implies --nginx)
-#                                     --ldap --keycloak
+#                                     --ldap
 #                                     --yes  (don't prompt for confirmation)
 #   ./arti-deployer down            stop everything (keeps volumes)
 #   ./arti-deployer reset           stop + wipe volumes (destructive)
@@ -18,6 +18,9 @@
 #   ./arti-deployer fed-repos       create one federated repo per common
 #                                   package type (generic/docker/maven/npm/
 #                                   pypi/helm/nuget/gradle/composer/go).
+#                                   Runs automatically as part of `up`
+#                                   for 2-instance topologies; this
+#                                   subcommand is for re-runs / repair.
 #                                   `--delete` to remove them. `list` to
 #                                   check which exist.
 #   ./arti-deployer status          show running services
@@ -134,7 +137,7 @@ wizard() {
 
   # 2. Configurations — separate yes/no per overlay (clearer than a multi-
   #    select where users sometimes press Enter without toggling first).
-  USE_NGINX=0; USE_LDAP=0; USE_KEYCLOAK=0; USE_NGINX_HTTPS=0
+  USE_NGINX=0; USE_LDAP=0; USE_NGINX_HTTPS=0
 
   if gum confirm "Add NGINX reverse proxy?"; then
     USE_NGINX=1
@@ -145,10 +148,6 @@ wizard() {
 
   if gum confirm "Add LDAP server?"; then
     USE_LDAP=1
-  fi
-
-  if gum confirm "Add Keycloak (OIDC) provider?"; then
-    USE_KEYCLOAK=1
   fi
 
   # 4. Artifactory version
@@ -168,8 +167,7 @@ wizard() {
   Instances:      ${INSTANCE_COUNT}
   AF version:     ${AF_VERSION}
   NGINX:          $([[ "${USE_NGINX}" == "1" ]] && echo "yes ($([[ "${USE_NGINX_HTTPS}" == "1" ]] && echo "HTTPS" || echo "HTTP"))" || echo no)
-  LDAP:           $([[ "${USE_LDAP}" == "1" ]] && echo yes || echo no)
-  Keycloak:       $([[ "${USE_KEYCLOAK}" == "1" ]] && echo yes || echo no)"
+  LDAP:           $([[ "${USE_LDAP}" == "1" ]] && echo yes || echo no)"
   echo
 
   gum confirm "Proceed with this configuration?" || { log_warn "Cancelled."; exit 0; }
@@ -202,7 +200,7 @@ cmd_fed_repos() {
 parse_up_flags() {
   INSTANCE_COUNT=1
   USE_NGINX=0; USE_NGINX_HTTPS=0
-  USE_LDAP=0; USE_KEYCLOAK=0
+  USE_LDAP=0
   local saw_flag=0
   local skip_confirm=0
   while [[ $# -gt 0 ]]; do
@@ -211,7 +209,6 @@ parse_up_flags() {
       --nginx)     USE_NGINX=1;                          saw_flag=1; shift ;;
       --https)     USE_NGINX=1; USE_NGINX_HTTPS=1;       saw_flag=1; shift ;;
       --ldap)      USE_LDAP=1;                           saw_flag=1; shift ;;
-      --keycloak)  USE_KEYCLOAK=1;                       saw_flag=1; shift ;;
       --yes|-y)    skip_confirm=1;                       saw_flag=1; shift ;;
       *) log_err "Unknown flag: $1"; exit 1 ;;
     esac
@@ -231,7 +228,7 @@ cmd_up() {
 
   parse_up_flags "$@"
   if [[ "${NON_INTERACTIVE}" == "1" ]]; then
-    log_step "Non-interactive: instances=${INSTANCE_COUNT} nginx=${USE_NGINX} https=${USE_NGINX_HTTPS} ldap=${USE_LDAP} keycloak=${USE_KEYCLOAK}"
+    log_step "Non-interactive: instances=${INSTANCE_COUNT} nginx=${USE_NGINX} https=${USE_NGINX_HTTPS} ldap=${USE_LDAP}"
     save_selection
   else
     wizard
@@ -279,17 +276,20 @@ cmd_up() {
   # Post-up configurators
   if [[ "${INSTANCE_COUNT}" == "2" ]]; then
     log_step "Configuring Circle of Trust + Access Federation"
-    "${SCRIPTS_DIR}/configure-cot.sh" || log_warn "CoT configurator returned non-zero — see scripts/configure-cot.sh"
+    if "${SCRIPTS_DIR}/configure-cot.sh"; then
+      log_step "Pre-creating federated repos (one per common package type)"
+      "${SCRIPTS_DIR}/fed-repos.sh" create || log_warn "fed-repos returned non-zero — see scripts/fed-repos.sh"
+    else
+      log_warn "CoT configurator failed — skipping fed-repos (base URLs aren't set,"
+      log_warn "so federated-repo creation would 500). Re-run with:"
+      log_warn "  rm ${STATE_DIR}/.cot-configured 2>/dev/null"
+      log_warn "  ./scripts/configure-cot.sh && ./arti-deployer fed-repos"
+    fi
   fi
 
   if [[ "${USE_LDAP}" == "1" ]]; then
     log_step "Wiring LDAP into Artifactory"
     "${SCRIPTS_DIR}/configure-ldap.sh" || log_warn "LDAP configurator returned non-zero — see scripts/configure-ldap.sh"
-  fi
-
-  if [[ "${USE_KEYCLOAK}" == "1" ]]; then
-    log_step "Wiring Keycloak (OIDC) into Artifactory"
-    "${SCRIPTS_DIR}/configure-keycloak.sh" || log_warn "Keycloak configurator returned non-zero — see scripts/configure-keycloak.sh"
   fi
 
   print_summary
