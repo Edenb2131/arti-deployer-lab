@@ -256,6 +256,13 @@ cmd_up() {
     wait_for_af "${AF2_HTTP_PORT}" "Artifactory 2"
   fi
 
+  # Optional: import an extra CA bundle into the AF JVMs. No-op unless
+  # EXTRA_TRUSTED_CA_BUNDLE is set in .env. Runs BEFORE the MC restart
+  # below so that restart doubles as the cacerts-reload — no extra
+  # downtime.
+  "${SCRIPTS_DIR}/install-extra-cas.sh" \
+    || log_warn "install-extra-cas.sh returned non-zero — proceeding anyway"
+
   # Restart Artifactory so Mission Control activates. mc.enabled in
   # system.yaml + JF_MC_ENABLED env var are read at startup, but on the
   # very first boot AF is still bootstrapping its data volume — the
