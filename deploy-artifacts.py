@@ -7,10 +7,11 @@ instance(s) are healthy. Defaults target art1 at http://localhost:8082
 with admin/password — exactly matches the lab's out-of-the-box state.
 
 Usage examples:
-  ./deploy-artifacts.py                                  # docker+npm+pypi on art1
+  ./deploy-artifacts.py                                  # docker+npm+pypi+maven+helm+nuget+generic on art1
   ./deploy-artifacts.py --repo-types docker maven helm   # custom subset
   ./deploy-artifacts.py --url http://localhost:8182      # target art2 instead
-  ./deploy-artifacts.py --dry-run -v                     # preview only
+  ./deploy-artifacts.py --dry-run                        # preview only (DEBUG logs are on by default)
+  ./deploy-artifacts.py -q                               # quieter: INFO level instead of DEBUG
   ./deploy-artifacts.py --release-bundles                # also create RBs
 
 Capabilities:
@@ -140,7 +141,7 @@ class PackageConfig:
 class AppConfig:
     artifactory: ArtifactoryConfig
     packages: PackageConfig
-    repo_types: list = field(default_factory=lambda: ["docker", "npm", "pypi"])
+    repo_types: list = field(default_factory=lambda: ["docker", "npm", "pypi", "maven", "helm", "nuget", "generic"])
     dry_run: bool = False
     log_level: str = "INFO"
     log_file: Optional[str] = None
@@ -237,7 +238,7 @@ def load_config(config_path: Optional[str], cli_overrides: dict) -> AppConfig:
     return AppConfig(
         artifactory=art_cfg,
         packages=pkg_cfg,
-        repo_types=cli_overrides.get("repo_types") or file_data.get("repo_types", ["docker", "npm", "pypi"]),
+        repo_types=cli_overrides.get("repo_types") or file_data.get("repo_types", ["docker", "npm", "pypi", "maven", "helm", "nuget", "generic"]),
         dry_run=cli_overrides.get("dry_run", False),
         log_level=cli_overrides.get("log_level", file_data.get("log_level", "INFO")),
         log_file=cli_overrides.get("log_file"),
@@ -402,6 +403,21 @@ class ArtifactoryClient:
             status_code=resp.status_code,
         )
 
+    def check_remote_reachable(self, api_path: str) -> tuple[bool, str]:
+        """GET a sample artifact through a remote repo to confirm AF can reach
+        the upstream registry. Returns (ok, reason)."""
+        url = f"{self._config.url}{api_path}"
+        if self._dry_run:
+            self._log.info("DRY RUN: would GET %s", url)
+            return True, "dry-run"
+        try:
+            resp = self._session.get(url, timeout=self._config.request_timeout)
+        except requests.RequestException as e:
+            return False, f"network error: {e}"
+        if resp.status_code == 200:
+            return True, "OK"
+        return False, f"HTTP {resp.status_code} from {url}"
+
     def create_release_bundle(self, name: str, version: str, repo_name: str) -> None:
         url = f"{self._config.url}/lifecycle/api/v2/release_bundle"
         payload = {
@@ -441,6 +457,11 @@ BASE_PACKAGE_JSON = {
     "dependencies": {},
 }
 
+# Dedicated venv for `jf pip install` so PEP 668 system Pythons (Homebrew,
+# recent Debian/Ubuntu, etc.) don't refuse the install. Lives under the
+# gitignored .arti-deployer/ dir and persists across runs.
+PYPI_VENV_PATH = os.path.join(".arti-deployer", "pypi-venv")
+
 class JFrogCLI:
     def __init__(self, config: ArtifactoryConfig, dry_run: bool = False):
         self._config = config
@@ -451,7 +472,7 @@ class JFrogCLI:
         return ["***" if token == self._config.password else token for token in cmd]
 
     def _run(self, cmd: list, description: str, *, check: bool = True,
-             retries: int = 1) -> subprocess.CompletedProcess:
+             retries: int = 1, env: Optional[dict] = None) -> subprocess.CompletedProcess:
         redacted = " ".join(self._redact(cmd))
         self._log.debug("Running [%s]: %s", description, redacted)
         if self._dry_run:
@@ -462,7 +483,7 @@ class JFrogCLI:
         for attempt in range(max(retries, 1)):
             try:
                 result = subprocess.run(
-                    cmd, check=check, capture_output=True, text=True
+                    cmd, check=check, capture_output=True, text=True, env=env
                 )
                 if result.stdout:
                     self._log.debug("stdout: %s", result.stdout.strip())
@@ -540,6 +561,40 @@ class JFrogCLI:
              "--repo-deploy", virtual_repo],
             "Setup PyPI resolver/deployer",
         )
+        self.ensure_pypi_venv()
+
+    def ensure_pypi_venv(self) -> None:
+        """Create the dedicated pip venv if missing. Required on PEP 668 systems
+        (Homebrew Python, recent Debian/Ubuntu) where `pip install` against the
+        system interpreter is refused."""
+        venv_path = os.path.abspath(PYPI_VENV_PATH)
+        if os.path.isdir(os.path.join(venv_path, "bin")):
+            self._log.debug("PyPI venv already exists at %s", venv_path)
+            return
+        if self._dry_run:
+            self._log.info("DRY RUN: would create PyPI venv at %s", venv_path)
+            return
+        os.makedirs(os.path.dirname(venv_path), exist_ok=True)
+        self._log.info("Creating PyPI venv at %s (one-time)", venv_path)
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "venv", venv_path],
+                check=True, capture_output=True, text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            raise ArtifactError(
+                f"Failed to create venv at {venv_path}: {e.stderr.strip() or e}"
+            ) from e
+
+    def _pypi_venv_env(self) -> dict:
+        """Build a subprocess env that activates the PyPI venv (PATH + VIRTUAL_ENV)."""
+        venv_path = os.path.abspath(PYPI_VENV_PATH)
+        venv_bin = os.path.join(venv_path, "bin")
+        env = os.environ.copy()
+        env["PATH"] = f"{venv_bin}{os.pathsep}{env.get('PATH', '')}"
+        env["VIRTUAL_ENV"] = venv_path
+        env.pop("PYTHONHOME", None)
+        return env
 
     def docker_login(self, registry: str) -> None:
         cfg = self._config
@@ -571,6 +626,7 @@ class JFrogCLI:
              "--build-number", build_number,
              "--no-cache-dir", "--force-reinstall"],
             f"pip install {pkg}",
+            env=self._pypi_venv_env(),
         )
 
     def collect_env(self, build_name: str, build_number: str) -> None:
@@ -774,6 +830,20 @@ class WorkflowRunner:
     def _pull_npm(self, packages: list) -> None:
         if not packages:
             return
+        # Confirm npm-remote can reach registry.npmjs.org before iterating —
+        # otherwise every install 404s with a misleading cascade.
+        ok, reason = self._client.check_remote_reachable(
+            "/artifactory/api/npm/npm-remote/express"
+        )
+        if not ok:
+            self._log.error(
+                "npm-remote upstream check failed (%s). Skipping npm installs. "
+                "The Artifactory container cannot reach https://registry.npmjs.org. "
+                "Fix: configure an outbound proxy under Admin > Proxies, or verify "
+                "the AF container has internet access (e.g. `docker exec <af> curl -sI https://registry.npmjs.org`).",
+                reason,
+            )
+            return
         build_name = self._build_name("npm")
         for pkg in packages:
             try:
@@ -939,7 +1009,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", metavar="PATH", help="Path to JSON config file")
     parser.add_argument(
         "--repo-types", nargs="+", choices=all_types, default=None, metavar="TYPE",
-        help=f"Repo types to create/use. Default: docker npm pypi. Choices: {all_types}",
+        help=f"Repo types to create/use. Default: docker npm pypi maven helm nuget generic. Choices: {all_types}",
     )
     parser.add_argument("--skip-repo-creation", action="store_true", help="Skip repo creation phase")
     parser.add_argument("--skip-pull", action="store_true", help="Skip artifact pull phase")
@@ -947,7 +1017,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--release-bundles", action="store_true", help="Create release bundles after build publish")
     parser.add_argument("--skip-cleanup", action="store_true", help="Skip cleanup phase")
     parser.add_argument("--dry-run", "-n", action="store_true", help="Preview actions without executing")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Enable DEBUG logging")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Log at INFO level (default is DEBUG)")
+    parser.add_argument("--verbose", "-v", action="store_true", help=argparse.SUPPRESS)  # back-compat no-op
     parser.add_argument("--log-file", metavar="PATH", help="Write logs to this file in addition to stderr")
     parser.add_argument("--build-name-prefix", default="", metavar="PREFIX", help="Prefix for build names")
     return parser
@@ -957,7 +1028,7 @@ if __name__ == "__main__":
     parser = build_arg_parser()
     args = parser.parse_args()
 
-    log_level = "DEBUG" if args.verbose else "INFO"
+    log_level = "INFO" if args.quiet else "DEBUG"
     setup_logging(level=log_level, log_file=args.log_file)
 
     cli_overrides = {
