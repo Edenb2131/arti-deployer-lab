@@ -126,10 +126,10 @@ class PackageConfig:
         "github.com/gin-gonic/gin/@v/v1.9.1.zip",
         "github.com/gorilla/mux/@v/v1.8.1.zip",
     ])
-    # NuGet: package paths relative to repo root (pulled via jf rt dl)
+    # NuGet: '<id>/<version>' specs (pulled via NuGet V2 Download endpoint)
     nuget: list = field(default_factory=lambda: [
-        "Newtonsoft.Json/13.0.3/Newtonsoft.Json.13.0.3.nupkg",
-        "log4net/2.0.15/log4net.2.0.15.nupkg",
+        "Newtonsoft.Json/13.0.3",
+        "log4net/2.0.15",
     ])
     # Generic: local filenames to create, upload, then download as test artifacts
     generic: list = field(default_factory=lambda: [
@@ -321,6 +321,10 @@ REPO_DEFINITIONS: dict[str, RepoDefinition] = {
         local_name="nuget-local",
         remote_name="nuget-remote",
         virtual_name="nuget-virtual",
+        remote_extra={
+            "downloadContextPath": "api/v2/package",
+            "feedContextPath": "api/v2",
+        },
     ),
     "generic": RepoDefinition(
         package_type="generic",
@@ -402,6 +406,30 @@ class ArtifactoryClient:
             f"Failed to create repo {repo_name} (HTTP {resp.status_code}): {resp.text}",
             status_code=resp.status_code,
         )
+
+    def pull_through(self, repo_path: str) -> bool:
+        """GET an artifact via the virtual repo path to trigger Artifactory's
+        pull-through cache load from the upstream. Plain `jf rt dl` against a
+        virtual repo only finds artifacts already cached (AQL search), so for
+        cold caches we need an HTTP GET first."""
+        url = f"{self._config.url}/artifactory/{repo_path.lstrip('/')}"
+        self._log.debug("Pull-through GET %s", url)
+        if self._dry_run:
+            self._log.info("DRY RUN: would GET %s", url)
+            return True
+        try:
+            with self._session.get(
+                url, stream=True, timeout=self._config.request_timeout * 4
+            ) as resp:
+                for _ in resp.iter_content(chunk_size=65536):
+                    pass
+                if resp.status_code == 200:
+                    return True
+                self._log.warning("Pull-through %s returned HTTP %d", url, resp.status_code)
+                return False
+        except requests.RequestException as e:
+            self._log.error("Pull-through failed for %s: %s", url, e)
+            return False
 
     def check_remote_reachable(self, api_path: str) -> tuple[bool, str]:
         """GET a sample artifact through a remote repo to confirm AF can reach
@@ -712,6 +740,11 @@ class WorkflowRunner:
         # host:port without scheme — used for docker login and pip --trusted-host
         url_no_scheme = config.artifactory.url.replace("http://", "").replace("https://", "")
         self._clean_url = url_no_scheme
+        # Types whose pull phase was skipped (e.g. preflight failure). Used
+        # by create_builds to avoid trying to publish a build that has no
+        # artifacts and would only produce misleading errors (e.g. `npm
+        # publish` ENOENT on a missing package.json).
+        self._skipped_pull: set[str] = set()
 
     def _build_name(self, pkg_type: str) -> str:
         return f"{self._config.build_name_prefix}{pkg_type}"
@@ -802,7 +835,7 @@ class WorkflowRunner:
             "maven":   lambda: self._pull_via_rt_dl("maven", self._config.packages.maven),
             "helm":    lambda: self._pull_via_rt_dl("helm", self._config.packages.helm),
             "go":      lambda: self._pull_via_rt_dl("go", self._config.packages.go),
-            "nuget":   lambda: self._pull_via_rt_dl("nuget", self._config.packages.nuget),
+            "nuget":   lambda: self._pull_nuget(self._config.packages.nuget),
             "generic": lambda: self._pull_generic(self._config.packages.generic),
         }
         for t in types:
@@ -838,11 +871,15 @@ class WorkflowRunner:
         if not ok:
             self._log.error(
                 "npm-remote upstream check failed (%s). Skipping npm installs. "
-                "The Artifactory container cannot reach https://registry.npmjs.org. "
-                "Fix: configure an outbound proxy under Admin > Proxies, or verify "
-                "the AF container has internet access (e.g. `docker exec <af> curl -sI https://registry.npmjs.org`).",
+                "Likely causes: (a) AF container can't reach https://registry.npmjs.org, "
+                "or (b) TLS trust failure — JVM truststore missing the npmjs.org CA "
+                "(symptom: PKIX path building failed in AF logs / Test button). "
+                "Fix (a): configure an outbound proxy under Admin > Proxies. "
+                "Fix (b): upload the cert chain via the npm-remote 'SSL/TLS Certificate' "
+                "field, or update the container's JVM cacerts.",
                 reason,
             )
+            self._skipped_pull.add("npm")
             return
         build_name = self._build_name("npm")
         for pkg in packages:
@@ -863,17 +900,60 @@ class WorkflowRunner:
                 self._log.error("Failed to install pip package %s: %s", pkg, e)
 
     def _pull_via_rt_dl(self, pkg_type: str, artifact_paths: list) -> None:
-        """Download artifacts from a virtual repo using 'jf rt dl'. Used for maven/helm/go/nuget."""
+        """Two-step pull: HTTP GET against the virtual repo path to trigger
+        Artifactory's cache load (since `jf rt dl` alone runs an AQL search
+        and won't fetch cold artifacts from upstream), then `jf rt dl` to
+        download locally + record build-info against the now-cached file."""
         if not artifact_paths:
             return
         rd = REPO_DEFINITIONS[pkg_type]
         build_name = self._build_name(pkg_type)
+        successes = 0
         for path in artifact_paths:
-            full_path = f"{rd.virtual_name}/{path}"
+            repo_path = f"{rd.virtual_name}/{path}"
+            if not self._client.pull_through(repo_path):
+                self._log.error(
+                    "Cache load failed for %s/%s — skipping rt dl. "
+                    "Check %s-remote URL/auth and the AF Test button.",
+                    pkg_type, path, pkg_type,
+                )
+                continue
             try:
-                self._cli.rt_download(full_path, build_name, self._build_number)
+                self._cli.rt_download(repo_path, build_name, self._build_number)
+                successes += 1
             except CommandError as e:
                 self._log.error("Failed to download %s artifact %s: %s", pkg_type, path, e)
+        if successes == 0:
+            # Nothing downloaded → no point publishing a build with empty info.
+            self._skipped_pull.add(pkg_type)
+
+    def _pull_nuget(self, package_specs: list) -> None:
+        """NuGet pull-through goes via AF's V2 Download endpoint, not the
+        plain repo path used by maven/helm. AF stores the resulting nupkg
+        flat in <remote>-cache as <id>.<version>.nupkg (no nested dirs),
+        which is the path we then `jf rt dl` against for build-info."""
+        if not package_specs:
+            return
+        rd = REPO_DEFINITIONS["nuget"]
+        build_name = self._build_name("nuget")
+        successes = 0
+        for spec in package_specs:
+            if "/" not in spec:
+                self._log.error("Invalid nuget spec %r (expected '<id>/<version>')", spec)
+                continue
+            pkg_id, pkg_version = spec.split("/", 1)
+            download_path = f"api/nuget/{rd.virtual_name}/Download/{pkg_id}/{pkg_version}"
+            if not self._client.pull_through(download_path):
+                self._log.error("Cache load failed for nuget/%s", spec)
+                continue
+            cached_path = f"{rd.remote_name}-cache/{pkg_id}.{pkg_version}.nupkg"
+            try:
+                self._cli.rt_download(cached_path, build_name, self._build_number)
+                successes += 1
+            except CommandError as e:
+                self._log.error("Failed rt dl for nuget/%s: %s", spec, e)
+        if successes == 0:
+            self._skipped_pull.add("nuget")
 
     def _pull_generic(self, filenames: list) -> None:
         """Upload generated test files to generic-local, then download them via generic-virtual."""
@@ -902,6 +982,9 @@ class WorkflowRunner:
     def create_builds(self, types: list) -> None:
         self._log.info("Publishing builds...")
         for pkg_type in types:
+            if pkg_type in self._skipped_pull:
+                self._log.info("Skipping build publish for %s — pull phase was skipped or yielded 0 artifacts.", pkg_type)
+                continue
             build_name = self._build_name(pkg_type)
             try:
                 self._cli.collect_env(build_name, self._build_number)
