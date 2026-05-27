@@ -490,6 +490,11 @@ BASE_PACKAGE_JSON = {
 # gitignored .arti-deployer/ dir and persists across runs.
 PYPI_VENV_PATH = os.path.join(".arti-deployer", "pypi-venv")
 
+# Target dir for `jf rt dl` so maven/helm/nuget/generic downloads don't
+# scatter nupkg/tgz files and nested dirs (org/, junit/, ...) across the
+# working tree. Wiped at the end of cleanup().
+DOWNLOAD_DIR = os.path.join(".arti-deployer", "downloads")
+
 class JFrogCLI:
     def __init__(self, config: ArtifactoryConfig, dry_run: bool = False):
         self._config = config
@@ -711,13 +716,14 @@ class JFrogCLI:
             "Setup Go resolver",
         )
 
-    def rt_download(self, artifact_path: str, build_name: str, build_number: str) -> None:
-        self._run(
-            ["jf", "rt", "dl", artifact_path,
-             "--build-name", build_name, "--build-number", build_number],
-            f"Download {artifact_path}",
-            retries=2,
-        )
+    def rt_download(self, artifact_path: str, build_name: str, build_number: str,
+                    target: Optional[str] = None) -> None:
+        cmd = ["jf", "rt", "dl", artifact_path]
+        if target:
+            cmd.append(target)
+        cmd += ["--build-name", build_name, "--build-number", build_number]
+        desc = f"Download {artifact_path}" + (f" -> {target}" if target else "")
+        self._run(cmd, desc, retries=2)
 
     def rt_upload(self, local_path: str, target: str, build_name: str, build_number: str) -> None:
         self._run(
@@ -919,7 +925,7 @@ class WorkflowRunner:
                 )
                 continue
             try:
-                self._cli.rt_download(repo_path, build_name, self._build_number)
+                self._cli.rt_download(repo_path, build_name, self._build_number, target=f"{DOWNLOAD_DIR}/")
                 successes += 1
             except CommandError as e:
                 self._log.error("Failed to download %s artifact %s: %s", pkg_type, path, e)
@@ -948,7 +954,7 @@ class WorkflowRunner:
                 continue
             cached_path = f"{rd.remote_name}-cache/{pkg_id}.{pkg_version}.nupkg"
             try:
-                self._cli.rt_download(cached_path, build_name, self._build_number)
+                self._cli.rt_download(cached_path, build_name, self._build_number, target=f"{DOWNLOAD_DIR}/")
                 successes += 1
             except CommandError as e:
                 self._log.error("Failed rt dl for nuget/%s: %s", spec, e)
@@ -968,7 +974,7 @@ class WorkflowRunner:
                     with open(filename, "w") as f:
                         f.write(f"generic test artifact: {filename}\nbuild: {self._build_number}\n")
                 self._cli.rt_upload(filename, f"{rd.local_name}/{filename}", build_name, self._build_number)
-                self._cli.rt_download(f"{rd.virtual_name}/{filename}", build_name, self._build_number)
+                self._cli.rt_download(f"{rd.virtual_name}/{filename}", build_name, self._build_number, target=f"{DOWNLOAD_DIR}/")
             except (CommandError, OSError) as e:
                 self._log.error("Failed to process generic artifact %s: %s", filename, e)
             finally:
@@ -1015,7 +1021,7 @@ class WorkflowRunner:
             return
         self._log.info("Cleaning up...")
         self._cli.logout()
-        for path in ["node_modules", "__pycache__", ".jfrog"]:
+        for path in ["node_modules", "__pycache__", ".jfrog", DOWNLOAD_DIR]:
             try:
                 if os.path.isdir(path):
                     shutil.rmtree(path)
