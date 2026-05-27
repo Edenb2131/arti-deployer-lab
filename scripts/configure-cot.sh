@@ -172,36 +172,76 @@ set_base_url() {
 set_base_url "${AF1_URL}" "art1" "${AF1_INTERNAL}/artifactory"
 set_base_url "${AF2_URL}" "art2" "${AF2_INTERNAL}/artifactory"
 
-# ─── 4. JPD pairing — what we attempted and why it's left out ──────────────
-# What I tried:
-#   a) POST /mc/api/v1/jpds with every combination of {token, joinKey,
-#      username/password, pairing_token, pairingToken}. Every combo gets
-#      either "Provide either a token or a username/password pair." or
-#      "Failed to join the JPD. Are the credentials correct?". The
-#      embedded mc microservice does an Access cluster-join against the
-#      peer and that step requires credentials only a standalone
-#      Mission Control deployment can produce.
-#   b) Direct INSERT into mc_jpd + mc_service + mc_service_node. Made
-#      GET /mc/api/v1/jpds report the peer as ONLINE — BUT the Admin →
-#      Topology → JPD Services UI then renders blank because the JS
-#      bundle expects coherent data across mc_jpd_edge_status + license
-#      tables that we didn't populate (frontend-service.log fills with
-#      "missing statusEvaluationTimeMs" WARNs for every node).
+# ─── 4. JPD pairing — register each AF as a JPD on its peer ────────────────
+# Both halves of the pair are now done via pure API (no UI):
+#   1) On the peer: POST /access/api/v1/service_trust/pairing/mission-control
+#      Returns a short-lived JWT signed by jfac with scope
+#      'internal:service-trust/pairing/mission-control:x' and an
+#      ext.exchange_url claim pointing at the peer's
+#      /artifactory/api/v1/service_trust/exchange endpoint. The endpoint
+#      lives in access (java/server/rest/.../ServiceTrustResource.java
+#      @Path("/v1/service_trust") + @POST @Path("/pairing/{usecase}")).
+#   2) On the local AF: POST /mc/api/ui/v1/jpds with
+#      {name, url, location, ..., token: <pairing_token>}. The peer's
+#      url MUST be the docker-internal hostname (http://artifactoryN:8082);
+#      MC then dials that URL + ext.exchange_url to complete the join.
 #
-# Conclusion: full multi-JPD visibility in the Topology UI + the
-# federated-repo "Add Members → Deployments" dropdown requires the
-# standalone JFrog Mission Control product (jfrog/mission-control:*),
-# not just mc.enabled in AF Pro. Federation ITSELF works without it:
-# CoT (step 1) + Base URL (step 3) is enough for cross-JPD replication
-# to flow. Verified live: clean DB, no JPD entries, replication still
-# completes in ~30-40s.
-#
-# When you create federated repos in the UI, the "Deployments" tab will
-# say "Remote JPDs not found". Use the "URL" tab instead and enter the
-# peer's docker-internal URL manually:
-#     http://artifactory2:8082/artifactory/<repo>   from art1
-#     http://artifactory1:8082/artifactory/<repo>   from art2
-# Or create the repos via API as we do in the smoke test below.
+# Why the earlier `POST /mc/api/v1/jpds` attempts (now removed from this
+# script's history) returned "Failed to join the JPD. Are the credentials
+# correct?": those tries used either random Access tokens or pairing-scope
+# tokens minted via /access/api/v1/tokens — which do NOT carry the
+# ext.exchange_url claim. The MC service validates ext is present and
+# matches the source JPD, so anything missing ext is rejected at join time.
+log_step "Pairing JPDs (each AF registers the other)"
+
+pair_jpd() {
+  # Register PEER as a JPD on LOCAL.
+  local local_url="$1" local_label="$2" local_token="$3"
+  local peer_url="$4" peer_label="$5" peer_token="$6" peer_internal="$7"
+
+  # Idempotent: skip if peer is already registered (by URL match).
+  local existing
+  existing=$(curl -sf -H "Authorization: Bearer ${local_token}" \
+    "${local_url}/mc/api/ui/v1/jpds" 2>/dev/null \
+    | jq -r --arg url "${peer_internal}/" '.[] | select(.url == $url and .is_local != true) | .name' \
+    | head -1)
+  if [[ -n "${existing}" ]]; then
+    log_ok "${peer_label} already registered as JPD '${existing}' on ${local_label}. Skipping."
+    return 0
+  fi
+
+  # 1) Mint pairing token on the peer.
+  local pairing_token
+  pairing_token=$(curl -sf -H "Authorization: Bearer ${peer_token}" \
+    -X POST "${peer_url}/access/api/v1/service_trust/pairing/mission-control" \
+    | jq -r '.pairing_token // empty')
+  if [[ -z "${pairing_token}" ]]; then
+    log_err "Failed to mint pairing token on ${peer_label}."
+    return 1
+  fi
+
+  # 2) Register the peer on local.
+  local body resp http
+  body=$(jq -nc --arg name "${peer_label}" --arg url "${peer_internal}" --arg t "${pairing_token}" \
+    '{name:$name, url:$url,
+      location:{city_name:"Local", country_code:"US", latitude:0, longitude:0},
+      shared_projects:[], is_shared_with_all_projects:false, token:$t}')
+  resp=$(curl -sS -o /tmp/jpd-pair-resp.json -w '%{http_code}' \
+    -H "Authorization: Bearer ${local_token}" \
+    -X POST -H 'Content-Type: application/json' --data "${body}" \
+    "${local_url}/mc/api/ui/v1/jpds")
+  if [[ "${resp}" =~ ^2 ]]; then
+    log_ok "Registered ${peer_label} as JPD on ${local_label} ($(jq -r '.id + " " + .status.code' /tmp/jpd-pair-resp.json))"
+  else
+    log_err "JPD pairing ${peer_label}→${local_label} failed (HTTP ${resp}):"
+    cat /tmp/jpd-pair-resp.json >&2
+    return 1
+  fi
+}
+
+pair_jpd "${AF1_URL}" "art1" "${TOKEN1}" "${AF2_URL}" "art2" "${TOKEN2}" "${AF2_INTERNAL}" || true
+pair_jpd "${AF2_URL}" "art2" "${TOKEN2}" "${AF1_URL}" "art1" "${TOKEN1}" "${AF1_INTERNAL}" || true
+
 log_step "Verifying federation replication (ephemeral repo)"
 
 SMOKE_REPO="arti-deployer-cot-smoke"
@@ -258,12 +298,10 @@ log_ok "Federation setup complete — both AFs trust each other and replication"
 log_ok "is verified. No demo repos left behind."
 echo
 log_info "Creating federated repos:"
-log_info "  • In the UI: Repositories → Federated → switch to the 'URL' tab"
-log_info "    (the 'Deployments' tab will say 'Remote JPDs not found' —"
-log_info "    that's expected without standalone Mission Control)"
-log_info "  • Enter the peer using its docker-internal URL:"
+log_info "  • In the UI: Repositories → Federated → both 'Deployments' and 'URL'"
+log_info "    tabs should now work (the peer JPD is registered)."
+log_info "  • If you do it by URL, use the docker-internal hostname:"
 log_info "      ✓ http://artifactory2:8082/artifactory/<repo>"
 log_info "      ✗ http://localhost:8182/artifactory/<repo>"
 log_info ""
-log_info "Or create via API — see scripts/configure-cot.sh smoke test for the"
-log_info "exact PUT payload."
+log_info "Or create via API — see the smoke test above for the exact PUT payload."
