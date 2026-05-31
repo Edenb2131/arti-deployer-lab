@@ -105,10 +105,45 @@ pulled through real repos, JFrog Builds recorded) with:
 
 ```bash
 pip install -r requirements.txt
-./deploy-artifacts.py             # docker + npm + pypi against art1
+./deploy-artifacts.py             # docker + npm + pypi + maven + helm + nuget + generic against art1
+./deploy-artifacts.py --url http://localhost:8182        # target art2 instead
+./deploy-artifacts.py --repo-types docker maven helm     # custom subset
+./deploy-artifacts.py --dry-run                          # preview only (DEBUG logs on by default)
+./deploy-artifacts.py --release-bundles                  # also create Release Bundles
 ```
 
 See [docs/deploy-artifacts.md](docs/deploy-artifacts.md) for all options.
+
+#### Standalone version
+
+The same logic lives as a separate, modular Python project at
+**[Edenb2131/create_artifacts_new_deployment](https://github.com/Edenb2131/create_artifacts_new_deployment)** —
+a multi-file refactor with the workflow split across `main.py`,
+`config.py`, `repo_definitions.py`, `artifactory/`, and `workflow/`.
+It's the more polished version; the in-repo `deploy-artifacts.py` is a
+single-file copy kept here for quick out-of-the-box use against this
+lab.
+
+Use it when you want to populate any Artifactory instance (cloud, VM,
+or another local stack), not just this lab. Quick start:
+
+```bash
+git clone https://github.com/Edenb2131/create_artifacts_new_deployment.git
+cd create_artifacts_new_deployment
+pip install -r requirements.txt
+
+cp credentials.example.py credentials.py
+# Edit credentials.py and set ARTIFACTORY_URL/USERNAME/PASSWORD, or
+# export ARTIFACTORY_URL=..., ARTIFACTORY_USERNAME=..., ARTIFACTORY_PASSWORD=...
+
+python main.py                                # default: docker + npm + pypi
+python main.py --repo-types docker maven      # custom subset
+python main.py --dry-run --verbose            # preview only
+python main.py --release-bundles              # also create Release Bundles
+```
+
+See that repo's README for the full CLI reference, JSON config schema,
+and troubleshooting guide.
 
 ## Safety notes
 
