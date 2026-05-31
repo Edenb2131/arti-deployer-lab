@@ -39,6 +39,12 @@ https} × {0,1 LDAP}` — all pass.
 - `gettext` for `envsubst` — `brew install gettext`
 - `jq`, `curl`, `openssl` — usually pre-installed on macOS
 - A JFrog Artifactory license (Pro / Enterprise / EnterpriseX)
+- The following host ports must be free (defaults; override in `.env`):
+  - **Artifactory 1:** `8081` (legacy), `8082` (router)
+  - **Artifactory 2** *(if running the dual-instance topology)*: `8181`, `8182`
+  - **NGINX** *(if `USE_NGINX_HTTPS=1`)*: `8080`, `8443`
+  - **OpenLDAP** *(if `USE_LDAP=1`)*: `1389` (plain), `1636` (TLS)
+  - Quick check: `lsof -nP -iTCP -sTCP:LISTEN | grep -E ':(8081|8082|8181|8182|8080|8443|1389|1636)\b'` — output should be empty.
 
 ## Quick start
 
