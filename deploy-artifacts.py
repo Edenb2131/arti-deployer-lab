@@ -729,6 +729,18 @@ class JFrogCLI:
         )
 
     def docker_pull(self, image_ref: str, build_name: str, build_number: str) -> None:
+        # `jf docker pull` only collects build-info when layers are actually
+        # downloaded. If the image is already in Docker's local cache from
+        # a previous run, the pull is a no-op and the resulting build has
+        # 0 modules. Force a fresh download by removing the cached image
+        # first; ignore failure (image may not be present).
+        try:
+            self._run(
+                ["docker", "rmi", "-f", image_ref],
+                f"Remove cached image {image_ref}",
+            )
+        except CommandError:
+            pass
         self._run(
             ["jf", "docker", "pull", image_ref,
              "--build-name", build_name, "--build-number", build_number],
@@ -1123,9 +1135,10 @@ class WorkflowRunner:
                 continue
             build_name = self._build_name(pkg_type)
             try:
+                # Build-info for npm/pypi is already attached to each `jf rt upload`
+                # via --build-name / --build-number, so we don't need `jf npm publish`
+                # here. Just publish the accumulated build info.
                 self._cli.collect_env(build_name, self._build_number)
-                if pkg_type == "npm":
-                    self._cli.npm_publish(build_name, self._build_number)
                 self._cli.publish_build(build_name, self._build_number)
             except CommandError as e:
                 self._log.error("Build publish failed for %s: %s", pkg_type, e)
