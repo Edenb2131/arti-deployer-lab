@@ -42,6 +42,31 @@ from typing import Optional
 
 import requests
 
+
+# ---------------------------------------------------------------------------
+# Lightweight .env loader. The lab keeps its config (license, ports, optional
+# corp-proxy overrides) in a sibling `.env` file. Bash's `./arti-deployer up`
+# sources it natively; this Python script needs the same vars (especially
+# the *_REMOTE_URL overrides used below), so we read .env at import time.
+# Anything already in os.environ wins, so explicit `export` still overrides.
+# ---------------------------------------------------------------------------
+def _load_dotenv(path: str = ".env") -> None:
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                v = v.strip().strip('"').strip("'")
+                os.environ.setdefault(k.strip(), v)
+    except OSError:
+        pass
+
+_load_dotenv()
+
 # ---------------------------------------------------------------------------
 # Credential variables — fill these in directly OR use env vars / --flags.
 # Priority: CLI flags > env vars (ARTIFACTORY_URL/USERNAME/PASSWORD) > these variables.
@@ -137,10 +162,42 @@ class PackageConfig:
         "generic-artifact-2.txt",
     ])
 
+# Default resolve-server for the JFrog-internal Package Traffic Controller
+# (PTC) SaaS. This lab is primarily for JFrog App Support / DSE colleagues
+# whose corp network reroutes npmjs.org / pypi.org traffic to this same
+# SaaS — so resolving npm/pypi directly from it sidesteps the corp block.
+# It's anonymous-read, no creds needed. Non-JFrog users (or anyone whose
+# corp doesn't run PTC) should set `JF_RESOLVE_URL=` (empty) in their .env
+# to fall back to using the local AF's own remote-repo resolution.
+DEFAULT_RESOLVE_URL = "https://jfrogrepo24.jfrog.io"
+
+
+@dataclass
+class ResolveServerConfig:
+    """Second JFrog server to use for package resolution. When `url` is
+    non-empty, `jf npmc` / `jf pipc` are configured with `--server-id-resolve`
+    pointing here, while `--server-id-deploy` stays on the primary (lab)
+    server. The lab AF still ends up with build-info and `npm publish`
+    results, but the actual tarball/wheel downloads come straight from
+    this resolve server (which doesn't need the lab AF's `baseUrl` to be
+    Mac-reachable)."""
+    url: str = DEFAULT_RESOLVE_URL
+    server_id: str = "resolve-server"
+    username: str = ""
+    password: str = ""
+    access_token: str = ""
+    npm_repo: str = "npm-virtual"
+    pypi_repo: str = "pypi-virtual"
+
+    def is_enabled(self) -> bool:
+        return bool(self.url)
+
+
 @dataclass
 class AppConfig:
     artifactory: ArtifactoryConfig
     packages: PackageConfig
+    resolve_server: "ResolveServerConfig" = field(default_factory=lambda: ResolveServerConfig())
     repo_types: list = field(default_factory=lambda: ["docker", "npm", "pypi", "maven", "helm", "nuget", "generic"])
     dry_run: bool = False
     log_level: str = "INFO"
@@ -222,6 +279,17 @@ def load_config(config_path: Optional[str], cli_overrides: dict) -> AppConfig:
         repo_settle_sleep=int(file_data.get("repo_settle_sleep", 2)),
     )
 
+    # Resolve-server (PTC SaaS) — default on, opt out by setting JF_RESOLVE_URL=""
+    resolve_cfg = ResolveServerConfig(
+        url=os.environ.get("JF_RESOLVE_URL", DEFAULT_RESOLVE_URL).rstrip("/"),
+        server_id=os.environ.get("JF_RESOLVE_SERVER_ID", "resolve-server"),
+        username=os.environ.get("JF_RESOLVE_USERNAME", ""),
+        password=os.environ.get("JF_RESOLVE_PASSWORD", ""),
+        access_token=os.environ.get("JF_RESOLVE_ACCESS_TOKEN", ""),
+        npm_repo=os.environ.get("JF_RESOLVE_NPM_REPO", "npm-virtual"),
+        pypi_repo=os.environ.get("JF_RESOLVE_PYPI_REPO", "pypi-virtual"),
+    )
+
     pkg_defaults = PackageConfig()
     pkg_data = file_data.get("packages", {})
     pkg_cfg = PackageConfig(
@@ -238,6 +306,7 @@ def load_config(config_path: Optional[str], cli_overrides: dict) -> AppConfig:
     return AppConfig(
         artifactory=art_cfg,
         packages=pkg_cfg,
+        resolve_server=resolve_cfg,
         repo_types=cli_overrides.get("repo_types") or file_data.get("repo_types", ["docker", "npm", "pypi", "maven", "helm", "nuget", "generic"]),
         dry_run=cli_overrides.get("dry_run", False),
         log_level=cli_overrides.get("log_level", file_data.get("log_level", "INFO")),
@@ -265,10 +334,14 @@ class RepoDefinition:
     remote_extra: dict = field(default_factory=dict)
     virtual_extra: dict = field(default_factory=dict)
 
+# Each upstream is overridable via a <TYPE>_REMOTE_URL env var (read from
+# .env or the shell). Useful when the public default is blocked by a corp
+# proxy that reroutes traffic to an internal JFrog instance — see README's
+# "Corp network with rerouting/PTC" section.
 REPO_DEFINITIONS: dict[str, RepoDefinition] = {
     "docker": RepoDefinition(
         package_type="docker",
-        remote_url="https://registry-1.docker.io",
+        remote_url=os.environ.get("DOCKER_REMOTE_URL", "https://registry-1.docker.io"),
         local_name="docker-local",
         remote_name="docker-remote",
         virtual_name="docker-virtual",
@@ -276,21 +349,21 @@ REPO_DEFINITIONS: dict[str, RepoDefinition] = {
     ),
     "npm": RepoDefinition(
         package_type="npm",
-        remote_url="https://registry.npmjs.org",
+        remote_url=os.environ.get("NPM_REMOTE_URL", "https://registry.npmjs.org"),
         local_name="npm-local",
         remote_name="npm-remote",
         virtual_name="npm-virtual",
     ),
     "pypi": RepoDefinition(
         package_type="pypi",
-        remote_url="https://files.pythonhosted.org",
+        remote_url=os.environ.get("PYPI_REMOTE_URL", "https://files.pythonhosted.org"),
         local_name="pypi-local",
         remote_name="pypi-remote",
         virtual_name="pypi-virtual",
     ),
     "maven": RepoDefinition(
         package_type="maven",
-        remote_url="https://repo1.maven.org/maven2",
+        remote_url=os.environ.get("MAVEN_REMOTE_URL", "https://repo1.maven.org/maven2"),
         local_name="maven-local",
         remote_name="maven-remote",
         virtual_name="maven-virtual",
@@ -303,21 +376,21 @@ REPO_DEFINITIONS: dict[str, RepoDefinition] = {
     ),
     "helm": RepoDefinition(
         package_type="helm",
-        remote_url="https://charts.bitnami.com/bitnami",
+        remote_url=os.environ.get("HELM_REMOTE_URL", "https://charts.bitnami.com/bitnami"),
         local_name="helm-local",
         remote_name="helm-remote",
         virtual_name="helm-virtual",
     ),
     "go": RepoDefinition(
         package_type="go",
-        remote_url="https://goproxy.io",
+        remote_url=os.environ.get("GO_REMOTE_URL", "https://goproxy.io"),
         local_name="go-local",
         remote_name="go-remote",
         virtual_name="go-virtual",
     ),
     "nuget": RepoDefinition(
         package_type="nuget",
-        remote_url="https://www.nuget.org",
+        remote_url=os.environ.get("NUGET_REMOTE_URL", "https://www.nuget.org"),
         local_name="nuget-local",
         remote_name="nuget-remote",
         virtual_name="nuget-virtual",
@@ -328,7 +401,7 @@ REPO_DEFINITIONS: dict[str, RepoDefinition] = {
     ),
     "generic": RepoDefinition(
         package_type="generic",
-        remote_url="https://releases.hashicorp.com",
+        remote_url=os.environ.get("GENERIC_REMOTE_URL", "https://releases.hashicorp.com"),
         local_name="generic-local",
         remote_name="generic-remote",
         virtual_name="generic-virtual",
@@ -566,35 +639,54 @@ class JFrogCLI:
 
     def logout(self) -> None:
         try:
-            self._run(
-                ["jf", "c", "remove", self._config.jfrog_cli_name, "--quiet"],
-                "JFrog CLI logout",
-            )
+            self._run(["jf", "c", "remove", self._config.jfrog_cli_name, "--quiet"],
+                      f"JFrog CLI logout ({self._config.jfrog_cli_name})")
         except (CommandError, Exception) as e:
             self._log.warning("Logout failed (non-critical): %s", e)
 
-    def setup_npm(self, virtual_repo: str) -> None:
-        cfg = self._config
-        self._run(
-            ["jf", "npmc",
-             "--server-id-resolve", cfg.jfrog_cli_name,
-             "--server-id-deploy", cfg.jfrog_cli_name,
-             "--repo-resolve", virtual_repo,
-             "--repo-deploy", virtual_repo],
-            "Setup NPM resolver/deployer",
-        )
+    def npm_pack(self, pkg: str, registry: str, dest_dir: str) -> dict:
+        """Download a package tarball via `npm pack` (no install, no
+        deps). Returns dict with name/version/filename keys. Uses plain
+        npm to sidestep `jf npm`'s anonymous-auth behavior which is
+        rejected by SaaS instances configured for true anonymous read."""
+        cmd = ["npm", "pack", pkg, f"--registry={registry}", "--json", "--silent"]
+        if self._dry_run:
+            self._log.info("DRY RUN: would run: %s in %s", " ".join(cmd), dest_dir)
+            return {"name": pkg.split("@")[0] or pkg, "version": "dry", "filename": f"{pkg}-dry.tgz"}
+        try:
+            result = subprocess.run(cmd, cwd=dest_dir, check=True, capture_output=True, text=True)
+            data = json.loads(result.stdout)
+            entry = data[0] if isinstance(data, list) else data
+            return {"name": entry["name"], "version": entry["version"], "filename": entry["filename"]}
+        except subprocess.CalledProcessError as e:
+            raise CommandError(f"npm pack {pkg} failed (exit {e.returncode})",
+                               returncode=e.returncode, stderr=(e.stderr or "").strip()) from e
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            raise ArtifactError(f"npm pack {pkg} returned unexpected output: {e}") from e
 
-    def setup_pypi(self, virtual_repo: str) -> None:
-        cfg = self._config
-        self._run(
-            ["jf", "pipc",
-             "--server-id-resolve", cfg.jfrog_cli_name,
-             "--server-id-deploy", cfg.jfrog_cli_name,
-             "--repo-resolve", virtual_repo,
-             "--repo-deploy", virtual_repo],
-            "Setup PyPI resolver/deployer",
-        )
+    def pip_download(self, pkg: str, index_url: str, dest_dir: str) -> list:
+        """Download package files via `pip download --no-deps`. Returns the
+        list of new file paths in dest_dir. Runs inside the dedicated pypi
+        venv to avoid PEP 668."""
         self.ensure_pypi_venv()
+        cmd = [
+            "pip", "download", pkg,
+            "--no-deps",
+            "--dest", dest_dir,
+            "--index-url", index_url,
+            "--no-cache-dir",
+        ]
+        if self._dry_run:
+            self._log.info("DRY RUN: would run: %s", " ".join(cmd))
+            return []
+        before = set(os.listdir(dest_dir)) if os.path.isdir(dest_dir) else set()
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True, env=self._pypi_venv_env())
+        except subprocess.CalledProcessError as e:
+            raise CommandError(f"pip download {pkg} failed (exit {e.returncode})",
+                               returncode=e.returncode, stderr=(e.stderr or "").strip()) from e
+        after = set(os.listdir(dest_dir)) if os.path.isdir(dest_dir) else set()
+        return [os.path.join(dest_dir, f) for f in (after - before)]
 
     def ensure_pypi_venv(self) -> None:
         """Create the dedicated pip venv if missing. Required on PEP 668 systems
@@ -825,10 +917,14 @@ class WorkflowRunner:
     def configure_cli(self, types: list) -> None:
         self._log.info("Configuring JFrog CLI...")
         self._cli.login()  # raises CommandError on failure (fail-fast)
-        if "npm" in types:
-            self._cli.setup_npm(REPO_DEFINITIONS["npm"].virtual_name)
+        if self._config.resolve_server.is_enabled():
+            self._log.info(
+                "npm/pypi will resolve from %s and upload tarballs to %s (lab AF).",
+                self._config.resolve_server.url, self._config.artifactory.jfrog_cli_name,
+            )
         if "pypi" in types:
-            self._cli.setup_pypi(REPO_DEFINITIONS["pypi"].virtual_name)
+            # Create the venv up front so it's ready by the time we run pip download.
+            self._cli.ensure_pypi_venv()
         if "go" in types:
             self._cli.setup_go(REPO_DEFINITIONS["go"].virtual_name)
 
@@ -867,43 +963,77 @@ class WorkflowRunner:
                 self._log.error("Failed to pull docker image %s: %s", image, e)
 
     def _pull_npm(self, packages: list) -> None:
+        """Two-step: download tarballs from the resolve server (jfrogrepo24
+        by default) via plain `npm pack`, then `jf rt upload` them into the
+        lab AF's npm-local. Build-info is collected via the upload's
+        --build-name/--build-number flags.
+
+        Plain `npm pack` avoids the `jf npm install` "anonymous user
+        couldn't be found" error against PTC-style SaaS, and avoids the
+        baseUrl/tarball-URL problem of resolving through the local AF."""
         if not packages:
             return
-        # Confirm npm-remote can reach registry.npmjs.org before iterating —
-        # otherwise every install 404s with a misleading cascade.
-        ok, reason = self._client.check_remote_reachable(
-            "/artifactory/api/npm/npm-remote/express"
-        )
-        if not ok:
-            self._log.error(
-                "npm-remote upstream check failed (%s). Skipping npm installs. "
-                "Likely causes: (a) AF container can't reach https://registry.npmjs.org, "
-                "or (b) TLS trust failure — JVM truststore missing the npmjs.org CA "
-                "(symptom: PKIX path building failed in AF logs / Test button). "
-                "Fix (a): configure an outbound proxy under Admin > Proxies. "
-                "Fix (b): upload the cert chain via the npm-remote 'SSL/TLS Certificate' "
-                "field, or update the container's JVM cacerts.",
-                reason,
+        resolve = self._config.resolve_server
+        if not resolve.is_enabled():
+            self._log.warning(
+                "JF_RESOLVE_URL is unset, so there's no upstream to pull npm "
+                "tarballs from. Skipping. (Set JF_RESOLVE_URL=https://jfrogrepo24.jfrog.io "
+                "in .env to use the JFrog PTC SaaS.)"
             )
             self._skipped_pull.add("npm")
             return
+        registry = f"{resolve.url.rstrip('/')}/artifactory/api/npm/{resolve.npm_repo}/"
         build_name = self._build_name("npm")
+        rd = REPO_DEFINITIONS["npm"]
+        staging = os.path.abspath(os.path.join(DOWNLOAD_DIR, "npm"))
+        if not self._config.dry_run:
+            os.makedirs(staging, exist_ok=True)
+        successes = 0
         for pkg in packages:
             try:
-                self._cli.add_npm_dependency(pkg)
-                self._cli.npm_install(pkg, build_name, self._build_number)
+                info = self._cli.npm_pack(pkg, registry, staging)
+                tarball_path = os.path.join(staging, info["filename"])
+                # AF npm-local conventional storage path: <name>/-/<filename>
+                target = f"{rd.local_name}/{info['name']}/-/{info['filename']}"
+                self._cli.rt_upload(tarball_path, target, build_name, self._build_number)
+                successes += 1
             except (CommandError, ArtifactError) as e:
-                self._log.error("Failed to install npm package %s: %s", pkg, e)
+                self._log.error("Failed to populate npm/%s: %s", pkg, e)
+        if successes == 0:
+            self._skipped_pull.add("npm")
 
     def _pull_pypi(self, packages: list) -> None:
+        """Plain `pip download` from the resolve server, then `jf rt upload`
+        each downloaded wheel/sdist to the lab AF's pypi-local."""
         if not packages:
             return
+        resolve = self._config.resolve_server
+        if not resolve.is_enabled():
+            self._log.warning(
+                "JF_RESOLVE_URL is unset, so there's no upstream to pull pypi "
+                "wheels from. Skipping. (Set JF_RESOLVE_URL=https://jfrogrepo24.jfrog.io "
+                "in .env to use the JFrog PTC SaaS.)"
+            )
+            self._skipped_pull.add("pypi")
+            return
+        index_url = f"{resolve.url.rstrip('/')}/artifactory/api/pypi/{resolve.pypi_repo}/simple"
         build_name = self._build_name("pypi")
+        rd = REPO_DEFINITIONS["pypi"]
+        staging = os.path.abspath(os.path.join(DOWNLOAD_DIR, "pypi"))
+        if not self._config.dry_run:
+            os.makedirs(staging, exist_ok=True)
+        successes = 0
         for pkg in packages:
             try:
-                self._cli.pip_install(pkg, self._clean_url, build_name, self._build_number)
-            except CommandError as e:
-                self._log.error("Failed to install pip package %s: %s", pkg, e)
+                files = self._cli.pip_download(pkg, index_url, staging)
+                for f in files:
+                    target = f"{rd.local_name}/{os.path.basename(f)}"
+                    self._cli.rt_upload(f, target, build_name, self._build_number)
+                    successes += 1
+            except (CommandError, ArtifactError) as e:
+                self._log.error("Failed to populate pypi/%s: %s", pkg, e)
+        if successes == 0:
+            self._skipped_pull.add("pypi")
 
     def _pull_via_rt_dl(self, pkg_type: str, artifact_paths: list) -> None:
         """Two-step pull: HTTP GET against the virtual repo path to trigger
